@@ -804,6 +804,11 @@ dependencies = [
 [[package]]
 name = "gk-chat"
 version = "0.1.0"
+dependencies = [
+ "log",
+ "rustls",
+ "webpki-roots",
+]
 
 [[package]]
 name = "gk-mpv"
