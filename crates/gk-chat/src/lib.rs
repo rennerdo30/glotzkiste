@@ -23,29 +23,31 @@ pub struct ChatLine {
     /// Removed by a moderator (shown struck out, not dropped).
     pub deleted: bool,
     pub mention: bool,
-    /// Increases with every line; widgets key on it.
+    /// Arrival number, unique across all channels and increasing with every
+    /// line: combined chats merge by it, widgets key on it.
     pub seq: u64,
 }
+
+static NEXT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// A channel's recent messages, capped (AGENTS.md performance rule 6).
 #[derive(Debug, Default)]
 pub struct ChatBuffer {
     lines: VecDeque<ChatLine>,
     cap: usize,
-    next_seq: u64,
     /// Bumped on every change, so a view knows when to lay out again.
     pub revision: u64,
 }
 
 impl ChatBuffer {
     pub fn new(cap: usize) -> Self {
-        Self { lines: VecDeque::with_capacity(cap.min(4096)), cap: cap.max(1), next_seq: 0, revision: 0 }
+        Self { lines: VecDeque::with_capacity(cap.min(4096)), cap: cap.max(1), revision: 0 }
     }
 
     pub fn push(&mut self, msg: ChatMessage, spans: Vec<Span>, system: Option<String>) {
         let mention = tokenize::mentions(&spans);
-        self.lines.push_back(ChatLine { msg, spans, system, deleted: false, mention, seq: self.next_seq });
-        self.next_seq += 1;
+        let seq = NEXT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.lines.push_back(ChatLine { msg, spans, system, deleted: false, mention, seq });
         while self.lines.len() > self.cap {
             self.lines.pop_front();
         }

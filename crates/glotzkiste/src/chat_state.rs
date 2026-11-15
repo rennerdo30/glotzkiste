@@ -1,7 +1,6 @@
 //! The app side of chat: the one connection, a buffer per channel, emote
 //! sets (7TV, BTTV, FFZ) and badges, loaded on workers.
 
-use crate::ui::chat::ChatView;
 use crate::workers::Pool;
 use gk_chat::{ChatBuffer, ChatClient, ChatEvent, ChatMessage, Credentials, EmoteLookup, EmoteRef, Span, tokenize};
 use gk_twitch::{Client, Emote};
@@ -20,7 +19,6 @@ pub struct ChannelChat {
     pub badges: Arc<BadgeMap>,
     pub emotes_requested: bool,
     pub joined: bool,
-    pub view: ChatView,
 }
 
 impl ChannelChat {
@@ -32,7 +30,6 @@ impl ChannelChat {
             badges: Arc::default(),
             emotes_requested: false,
             joined: false,
-            view: ChatView::default(),
         }
     }
 }
@@ -76,6 +73,8 @@ pub struct ChatState {
     pub login: Option<String>,
     pub connected: bool,
     pub last_error: Option<String>,
+    /// Bumped when every chat layout must be redone (new emote sets).
+    pub generation: u64,
 }
 
 impl ChatState {
@@ -130,6 +129,7 @@ impl ChatState {
             login: credentials.map(|c| c.login),
             connected: false,
             last_error: None,
+            generation: 0,
         }
     }
 
@@ -200,7 +200,7 @@ impl ChatState {
             let me = self.login.clone().unwrap_or_default();
             let emotes = ch.emotes.clone();
             ch.buffer.retokenize(|m| tokenize(m, &Lookup { channel: &emotes, global: &global }, &me));
-            ch.view.invalidate();
+            self.generation += 1;
             self.channels.insert(name, ch);
         }
     }

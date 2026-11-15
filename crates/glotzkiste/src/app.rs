@@ -95,6 +95,8 @@ pub struct App {
     info_at: Option<Instant>,
     fonts_slot: Slot<egui::FontDefinitions>,
     pub(crate) renaming: Option<usize>,
+    /// Scroll position and input of each chat pane.
+    pub(crate) chat_views: HashMap<egui_tiles::TileId, crate::ui::chat::ChatView>,
     pub(crate) stats_open: bool,
     pub(crate) about_open: bool,
     pub(crate) update: UpdateState,
@@ -227,9 +229,16 @@ impl App {
             let panes = options.channels.iter().map(|c| Pane::stream(c)).collect();
             let title = if tabs.is_empty() { "Main".to_owned() } else { format!("Tab {}", tabs.len() + 1) };
             let mut tab = Tab::new(&title, panes);
-            if options.chat {
+            if options.chat || options.chat_all {
                 let first = options.channels[0].clone();
                 tab.apply(Preset::Grid, Some(first));
+            }
+            if options.chat_all {
+                for t in tab.tree.tiles.tiles_mut() {
+                    if let egui_tiles::Tile::Pane(Pane::Chat { mode, .. }) = t {
+                        *mode = crate::layout::ChatMode::AllStreams;
+                    }
+                }
             }
             tabs.push(tab);
             active = tabs.len() - 1;
@@ -277,6 +286,7 @@ impl App {
             info_at: None,
             fonts_slot,
             renaming: None,
+            chat_views: HashMap::new(),
             stats_open: false,
             about_open: false,
             update: UpdateState::default(),
@@ -330,6 +340,7 @@ impl App {
                 tab.audio = tab.stream_channels().into_iter().next();
             }
             let audio = tab.audio.clone();
+            let tab_streams = tab.stream_channels();
             for tile in tab.tree.tiles.tiles_mut() {
                 match tile {
                     egui_tiles::Tile::Pane(Pane::Stream(p)) => {
@@ -353,8 +364,8 @@ impl App {
                         e.0 |= active;
                         e.1 |= active && audio.as_deref() == Some(p.channel.as_str());
                     }
-                    egui_tiles::Tile::Pane(Pane::Chat { channel }) => {
-                        chats.insert(channel.clone());
+                    egui_tiles::Tile::Pane(Pane::Chat { channel, mode }) => {
+                        chats.extend(crate::layout::chat_channels(channel, mode, &tab_streams));
                     }
                     _ => {}
                 }
@@ -601,9 +612,7 @@ impl App {
     fn poll(&mut self) {
         if let Some(defs) = self.fonts_slot.lock().ok().and_then(|mut s| s.take()) {
             self.ctx.set_fonts(defs);
-            for ch in self.chat.channels.values_mut() {
-                ch.view.invalidate();
-            }
+            self.chat.generation += 1;
         }
         if let Some((force, r)) = self.update_slot.lock().ok().and_then(|mut s| s.take()) {
             self.update.checking = false;

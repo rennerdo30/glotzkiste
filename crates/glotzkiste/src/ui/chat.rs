@@ -5,6 +5,7 @@
 use crate::chat_state::BadgeMap;
 use crate::images::Images;
 use egui::{Color32, FontId, Pos2, Rect, Vec2, pos2, vec2};
+use egui::RichText;
 use gk_chat::{ChatBuffer, ChatLine, Span};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,6 +31,7 @@ struct Laid {
     bar: Option<Color32>,
 }
 
+/// The state of one chat pane (scroll position, layouts, the input line).
 #[derive(Default)]
 pub struct ChatView {
     /// Pixels scrolled up from the newest line (0 = following).
@@ -38,19 +40,71 @@ pub struct ChatView {
     new_below: usize,
     cache: HashMap<u64, Laid>,
     width: f32,
+    /// The chat state's layout generation the cache belongs to.
+    generation: u64,
+    /// Channel chips shown (a combined chat).
+    tagged: bool,
     pub input: String,
+    /// Where messages go in a combined chat.
+    pub target: Option<String>,
+}
+
+/// What a pane shows: one channel, or several merged in arrival order.
+pub struct Source<'a> {
+    pub channels: Vec<(&'a str, &'a ChatBuffer, &'a BadgeMap)>,
+}
+
+impl<'a> Source<'a> {
+    /// Lines newest first; several channels are merged by arrival number.
+    fn newest_first(&self) -> impl Iterator<Item = (usize, &'a ChatLine)> + '_ {
+        let mut pos: Vec<usize> = self.channels.iter().map(|(_, b, _)| b.len()).collect();
+        std::iter::from_fn(move || {
+            let mut best: Option<(usize, &'a ChatLine)> = None;
+            for (i, (_, b, _)) in self.channels.iter().enumerate() {
+                if pos[i] == 0 {
+                    continue;
+                }
+                if let Some(l) = b.get(pos[i] - 1)
+                    && best.is_none_or(|(_, bl)| l.seq > bl.seq)
+                {
+                    best = Some((i, l));
+                }
+            }
+            let (i, l) = best?;
+            pos[i] -= 1;
+            Some((i, l))
+        })
+    }
+
+    fn total(&self) -> usize {
+        self.channels.iter().map(|(_, b, _)| b.len()).sum()
+    }
+
+    fn oldest_seq(&self) -> Option<u64> {
+        self.channels.iter().filter_map(|(_, b, _)| b.get(0).map(|l| l.seq)).min()
+    }
 }
 
 pub struct Paint<'a> {
     pub images: &'a mut Images,
-    pub badges: &'a BadgeMap,
     pub global_badges: &'a BadgeMap,
+    /// Bumped when every layout must be redone (emote sets, fonts).
+    pub generation: u64,
 }
 
 pub enum Action {
     None,
-    Send(String),
+    /// (channel, text)
+    Send(String, String),
     Login,
+}
+
+/// A stable colour per channel for the chips of a combined chat.
+pub fn channel_color(channel: &str) -> Color32 {
+    const PALETTE: [[u8; 3]; 8] = [[34, 211, 238], [244, 114, 182], [52, 211, 153], [251, 191, 36], [167, 139, 250], [248, 113, 113], [96, 165, 250], [163, 230, 53]];
+    let h = channel.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ u32::from(b));
+    let [r, g, b] = PALETTE[(h % PALETTE.len() as u32) as usize];
+    Color32::from_rgb(r, g, b)
 }
 
 /// Readable name colours on a dark background.
@@ -162,7 +216,7 @@ impl Flow<'_> {
     }
 }
 
-fn layout(line: &ChatLine, width: f32, ctx: &egui::Context, p: &mut Paint<'_>) -> Laid {
+fn layout(line: &ChatLine, tag: Option<&str>, badges: &BadgeMap, width: f32, ctx: &egui::Context, p: &mut Paint<'_>) -> Laid {
     let mut f = Flow { width, x: 0.0, row_top: 0.0, row: Vec::new(), out: Vec::new(), ctx };
     let mut complete = true;
     let m = &line.msg;
@@ -177,6 +231,10 @@ fn layout(line: &ChatLine, width: f32, ctx: &egui::Context, p: &mut Paint<'_>) -
             f.break_row();
         }
     }
+    // In a combined chat every line says where it is from.
+    if let Some(c) = tag {
+        f.text(&format!("{c} "), crate::fonts::bold(12.0), dim(channel_color(c)), None);
+    }
     if let Some((who, body)) = &m.reply_to {
         let short: String = body.chars().take(60).collect();
         f.text(&format!("↪ {who}: {short}"), FontId::proportional(12.0), Color32::from_gray(140), None);
@@ -184,7 +242,7 @@ fn layout(line: &ChatLine, width: f32, ctx: &egui::Context, p: &mut Paint<'_>) -
     }
     if !m.login.is_empty() {
         for (set, ver) in &m.badges {
-            let url = p.badges.get(&(set.clone(), ver.clone())).or_else(|| p.global_badges.get(&(set.clone(), ver.clone())));
+            let url = badges.get(&(set.clone(), ver.clone())).or_else(|| p.global_badges.get(&(set.clone(), ver.clone())));
             if let Some(url) = url {
                 match p.images.get(url) {
                     Some(img) => f.image(img.texture_id(), img.size(), BADGE_H, set.clone()),
@@ -234,50 +292,50 @@ fn layout(line: &ChatLine, width: f32, ctx: &egui::Context, p: &mut Paint<'_>) -
 }
 
 impl ChatView {
-    pub fn invalidate(&mut self) {
-        self.cache.clear();
-    }
-
-    fn laid<'a>(&'a mut self, line: &ChatLine, width: f32, ctx: &egui::Context, p: &mut Paint<'_>) -> &'a Laid {
+    #[allow(clippy::too_many_arguments)]
+    fn laid<'a>(&'a mut self, line: &ChatLine, tag: Option<&str>, badges: &BadgeMap, width: f32, ctx: &egui::Context, p: &mut Paint<'_>) -> &'a Laid {
         let stale = match self.cache.get(&line.seq) {
             None => true,
             Some(l) => !l.complete && l.images_gen != p.images.generation,
         };
         if stale {
-            let l = layout(line, width, ctx, p);
+            let l = layout(line, tag, badges, width, ctx, p);
             self.cache.insert(line.seq, l);
         }
         &self.cache[&line.seq]
     }
 
     /// Draws the messages and the input line inside `rect`.
-    pub fn show(&mut self, ui: &mut egui::Ui, rect: Rect, buffer: &ChatBuffer, can_send: bool, p: &mut Paint<'_>) -> Action {
+    pub fn show(&mut self, ui: &mut egui::Ui, rect: Rect, src: &Source<'_>, can_send: bool, p: &mut Paint<'_>) -> Action {
         let mut action = Action::None;
         let ctx = ui.ctx().clone();
         let input_h = 34.0;
         let list = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - input_h));
         let width = (list.width() - 2.0 * PAD).max(40.0);
-        if (width - self.width).abs() > 0.5 {
+        let tagged = src.channels.len() > 1;
+        if (width - self.width).abs() > 0.5 || self.generation != p.generation || self.tagged != tagged {
             self.width = width;
+            self.generation = p.generation;
+            self.tagged = tagged;
             self.cache.clear();
         }
-        // Drop layouts of lines that left the buffer.
-        if let Some(first) = buffer.get(0) {
-            let oldest = first.seq;
-            if self.cache.len() > buffer.len() + 64 {
-                self.cache.retain(|seq, _| *seq >= oldest);
-            }
+        // Drop layouts of lines that left the buffers.
+        if let Some(oldest) = src.oldest_seq()
+            && self.cache.len() > src.total() + 64
+        {
+            self.cache.retain(|seq, _| *seq >= oldest);
         }
+        let tag_of = |i: usize| tagged.then(|| src.channels[i].0);
         // New lines while scrolled up keep the view still.
-        let newest = buffer.iter().next_back().map(|l| l.seq);
-        if let (Some(prev), Some(_)) = (self.last_seq, newest) {
-            if self.scroll_up > 0.0 {
-                let new: Vec<&ChatLine> = buffer.iter().rev().take_while(|l| l.seq > prev).collect();
-                for l in new {
-                    let h = self.laid(l, width, &ctx, p).height + LINE_GAP;
-                    self.scroll_up += h;
-                    self.new_below += 1;
-                }
+        let newest = src.newest_first().next().map(|(_, l)| l.seq);
+        if let (Some(prev), Some(_)) = (self.last_seq, newest)
+            && self.scroll_up > 0.0
+        {
+            let new: Vec<(usize, &ChatLine)> = src.newest_first().take_while(|(_, l)| l.seq > prev).collect();
+            for (i, l) in new {
+                let h = self.laid(l, tag_of(i), src.channels[i].2, width, &ctx, p).height + LINE_GAP;
+                self.scroll_up += h;
+                self.new_below += 1;
             }
         }
         self.last_seq = newest;
@@ -298,8 +356,8 @@ impl ChatView {
         let mut hover_link: Option<String> = None;
         let mut y = list.max.y - PAD + self.scroll_up;
         let mut reached_top = true;
-        for line in buffer.iter().rev() {
-            let laid = self.laid(line, width, &ctx, p);
+        for (i, line) in src.newest_first() {
+            let laid = self.laid(line, tag_of(i), src.channels[i].2, width, &ctx, p);
             let top = y - laid.height;
             if top > list.max.y {
                 y = top - LINE_GAP;
@@ -369,15 +427,38 @@ impl ChatView {
                 self.scroll_up = 0.0;
             }
         }
-        // Input line.
-        let input = Rect::from_min_max(pos2(rect.min.x + 6.0, list.max.y + 4.0), pos2(rect.max.x - 6.0, rect.max.y - 4.0));
+        // Input line; a combined chat picks the channel to write to.
+        let mut input = Rect::from_min_max(pos2(rect.min.x + 6.0, list.max.y + 4.0), pos2(rect.max.x - 6.0, rect.max.y - 4.0));
+        let names: Vec<&str> = src.channels.iter().map(|(c, _, _)| *c).collect();
+        if self.target.as_deref().is_none_or(|t| !names.contains(&t)) {
+            self.target = names.first().map(|c| (*c).to_owned());
+        }
+        if can_send && names.len() > 1 {
+            let picker = Rect::from_min_max(input.min, pos2(input.min.x + 120.0, input.max.y));
+            input.min.x = picker.max.x + 6.0;
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(picker));
+            let current = self.target.clone().unwrap_or_default();
+            egui::ComboBox::from_id_salt(ui.scope_id().with("send-target")).selected_text(RichText::new(format!("→ {current}")).color(channel_color(&current))).width(110.0).show_ui(&mut child, |ui| {
+                for c in &names {
+                    if ui.selectable_label(current == *c, RichText::new(*c).color(channel_color(c))).clicked() {
+                        self.target = Some((*c).to_owned());
+                    }
+                }
+            });
+        }
         if can_send {
-            let te = egui::TextEdit::singleline(&mut self.input).hint_text("Send a message").char_limit(500).desired_width(input.width());
+            let hint = match (&self.target, names.len()) {
+                (Some(t), n) if n > 1 => format!("Send to {t}"),
+                _ => "Send a message".to_owned(),
+            };
+            let te = egui::TextEdit::singleline(&mut self.input).hint_text(hint).char_limit(500).desired_width(input.width());
             let r = ui.put(input, te);
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let text = std::mem::take(&mut self.input);
-                if !text.trim().is_empty() {
-                    action = Action::Send(text);
+                if !text.trim().is_empty()
+                    && let Some(t) = self.target.clone()
+                {
+                    action = Action::Send(t, text);
                 }
                 r.request_focus();
             }

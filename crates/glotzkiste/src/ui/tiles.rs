@@ -5,7 +5,8 @@ use super::{ACCENT, BAD, GOOD, MUTED, PANEL, RAISED, TEXT, WARN, pill};
 use crate::app::App;
 use crate::chat_state::{BadgeMap, ChatState};
 use crate::images::Images;
-use crate::layout::{Pane, StreamPane};
+use crate::layout::{ChatMode, Pane, StreamPane, chat_channels};
+use super::chat::channel_color;
 use crate::stream::{Cmd, Quality, State, Status, StreamHandle};
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, pos2, vec2};
 use egui_tiles::{TileId, UiResponse};
@@ -40,6 +41,9 @@ struct Behavior<'a> {
     rects: Vec<super::stats::TileRect>,
     /// Stats on the tiles themselves.
     overlay: Option<&'a super::stats::Rates>,
+    chat_views: &'a mut HashMap<TileId, super::chat::ChatView>,
+    /// The streams of the tab, in reading order (chat picker, combined chats).
+    tab_streams: Vec<String>,
 }
 
 fn latency_color(tenths: u32) -> Color32 {
@@ -209,7 +213,7 @@ impl Behavior<'_> {
         response
     }
 
-    fn chat_ui(&mut self, ui: &mut egui::Ui, tile: TileId, channel: &str) -> UiResponse {
+    fn chat_ui(&mut self, ui: &mut egui::Ui, tile: TileId, channel: &mut String, mode: &mut ChatMode) -> UiResponse {
         let rect = ui.max_rect();
         let painter = ui.painter().clone();
         painter.rect_filled(rect, 0.0, PANEL);
@@ -220,10 +224,79 @@ impl Behavior<'_> {
         if drag.drag_started() {
             response = UiResponse::DragStarted;
         }
+        let shown = chat_channels(channel, mode, &self.tab_streams);
         let dot = if self.chat.connected { GOOD } else { WARN };
         let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(header.shrink2(vec2(10.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         hui.label(RichText::new("●").color(dot).size(10.0)).on_hover_text(if self.chat.connected { "Connected" } else { "Connecting…" });
-        hui.label(RichText::new(format!("{channel} chat")).font(crate::fonts::bold(14.0)).color(TEXT));
+        // The title is the channel picker.
+        let title = match mode {
+            ChatMode::One => format!("{channel} chat ▾"),
+            ChatMode::AllStreams => format!("All chats in this tab ({}) ▾", shown.len()),
+            ChatMode::Several(_) => format!("{} chats combined ▾", shown.len()),
+        };
+        let filter_id = ui.scope_id().with(("chat-filter", tile));
+        hui.menu_button(RichText::new(title).font(crate::fonts::bold(14.0)).color(TEXT), |ui| {
+            ui.set_min_width(260.0);
+            ui.set_max_width(300.0);
+            // One list: the name shows only that chat, the box combines.
+            let mut filter = ui.data_mut(|d| d.get_temp::<String>(filter_id).unwrap_or_default());
+            let r = ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Filter, or type a channel + Enter").desired_width(f32::INFINITY));
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let login = filter.trim().trim_start_matches("https://").trim_start_matches("www.").trim_start_matches("twitch.tv/").to_ascii_lowercase();
+                if gk_twitch::api::valid_login(&login) {
+                    *mode = ChatMode::One;
+                    *channel = login;
+                    filter.clear();
+                    ui.close();
+                }
+            }
+            let all = *mode == ChatMode::AllStreams;
+            if ui.selectable_label(all, format!("All streams in this tab ({})", self.tab_streams.len())).on_hover_text("One chat for every stream here; follows the tab").clicked() {
+                *mode = if all { ChatMode::One } else { ChatMode::AllStreams };
+            }
+            ui.separator();
+            let mut candidates: Vec<String> = Vec::new();
+            for c in self.tab_streams.iter().chain(shown.iter()) {
+                if !candidates.contains(c) {
+                    candidates.push(c.clone());
+                }
+            }
+            let needle = filter.trim().to_ascii_lowercase();
+            let mut picked: Vec<String> = shown.clone();
+            let mut changed = false;
+            egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+                for c in candidates.iter().filter(|c| needle.is_empty() || c.contains(&needle)) {
+                    ui.horizontal(|ui| {
+                        let mut on = picked.contains(c);
+                        if ui.checkbox(&mut on, "").on_hover_text("Combine with the others").changed() {
+                            if on {
+                                picked.push(c.clone());
+                            } else {
+                                picked.retain(|x| x != c);
+                            }
+                            changed = true;
+                        }
+                        let only = *mode == ChatMode::One && channel == c;
+                        if ui.selectable_label(only, RichText::new(c).color(channel_color(c))).on_hover_text("Show only this chat").clicked() {
+                            *mode = ChatMode::One;
+                            *channel = c.clone();
+                            ui.close();
+                        }
+                    });
+                }
+            });
+            if changed {
+                if picked.len() == 1 {
+                    *channel = picked[0].clone();
+                    *mode = ChatMode::One;
+                } else if !picked.is_empty() {
+                    *channel = picked[0].clone();
+                    *mode = ChatMode::Several(picked);
+                }
+            }
+            ui.label(RichText::new("Name: only that chat · box: combine").color(MUTED).size(11.0));
+            ui.data_mut(|d| d.insert_temp(filter_id, filter));
+        });
         hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(egui::Button::new("✕").frame(false)).on_hover_text("Close chat").clicked() {
                 self.acts.push(Act::Remove(tile));
@@ -232,17 +305,25 @@ impl Behavior<'_> {
         let body = Rect::from_min_max(pos2(rect.min.x, header.max.y), rect.max);
         let global: BadgeMap = self.chat.global_badges().clone();
         let can_send = self.logged_in;
-        if let Some(ch) = self.chat.channels.get_mut(channel) {
-            let badges = ch.badges.clone();
-            let mut paint = super::chat::Paint { images: self.images, badges: &badges, global_badges: &global };
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
-            match ch.view.show(&mut child, body, &ch.buffer, can_send, &mut paint) {
-                super::chat::Action::Send(t) => self.acts.push(Act::Send(channel.to_owned(), t)),
-                super::chat::Action::Login => self.acts.push(Act::Login),
-                super::chat::Action::None => {}
-            }
-        } else {
+        let channels: Vec<(&str, &gk_chat::ChatBuffer, &BadgeMap)> = shown
+            .iter()
+            .filter_map(|c| {
+                let ch = self.chat.channels.get(c)?;
+                Some((c.as_str(), &ch.buffer, &*ch.badges))
+            })
+            .collect();
+        if channels.is_empty() {
             painter.text(body.center(), egui::Align2::CENTER_CENTER, "Joining…", FontId::proportional(14.0), MUTED);
+            return response;
+        }
+        let src = super::chat::Source { channels };
+        let mut paint = super::chat::Paint { images: self.images, global_badges: &global, generation: self.chat.generation };
+        let view = self.chat_views.entry(tile).or_default();
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
+        match view.show(&mut child, body, &src, can_send, &mut paint) {
+            super::chat::Action::Send(c, t) => self.acts.push(Act::Send(c, t)),
+            super::chat::Action::Login => self.acts.push(Act::Login),
+            super::chat::Action::None => {}
         }
         response
     }
@@ -266,16 +347,13 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile: TileId, pane: &mut Pane) -> UiResponse {
         let kind = match pane {
             Pane::Stream(p) => super::stats::TileKind::Stream { id: p.id, channel: p.channel.clone() },
-            Pane::Chat { channel } => super::stats::TileKind::Chat { channel: channel.clone() },
+            Pane::Chat { channel, mode } => super::stats::TileKind::Chat { channel: chat_channels(channel, mode, &self.tab_streams).join(" + ") },
             Pane::Empty => super::stats::TileKind::Empty,
         };
         self.rects.push(super::stats::TileRect { rect: ui.max_rect(), kind });
         match pane {
             Pane::Stream(p) => self.stream_ui(ui, tile, p),
-            Pane::Chat { channel } => {
-                let c = channel.clone();
-                self.chat_ui(ui, tile, &c)
-            }
+            Pane::Chat { channel, mode } => self.chat_ui(ui, tile, channel, mode),
             Pane::Empty => self.empty_ui(ui, tile),
         }
     }
@@ -283,7 +361,10 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
     fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
         match pane {
             Pane::Stream(p) => self.info.get(&p.channel).map(|i| i.display_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| p.channel.clone()).into(),
-            Pane::Chat { channel } => format!("{channel} chat").into(),
+            Pane::Chat { channel, mode } => match mode {
+                ChatMode::One => format!("{channel} chat").into(),
+                _ => "combined chat".into(),
+            },
             Pane::Empty => "empty".into(),
         }
     }
@@ -313,6 +394,16 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
     let ppp = ui.ctx().pixels_per_point();
     let active = app.active.min(app.tabs.len().saturating_sub(1));
     let audio = app.tabs.get(active).and_then(|t| t.audio.clone());
+    let mut tab_streams: Vec<String> = Vec::new();
+    for c in app.tabs.get(active).map(|t| t.stream_channels()).unwrap_or_default() {
+        if !tab_streams.contains(&c) {
+            tab_streams.push(c);
+        }
+    }
+    // Views of chat panes that no longer exist are dropped.
+    if let Some(tab) = app.tabs.get(active) {
+        app.chat_views.retain(|id, _| tab.tree.tiles.get(*id).is_some() || app.tabs.iter().any(|t| t.tree.tiles.get(*id).is_some()));
+    }
     let mut b = Behavior {
         streams: &app.streams,
         chat: &mut app.chat,
@@ -328,6 +419,8 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
         add_text: &mut app.add_text,
         rects: Vec::new(),
         overlay: app.stats_on_tiles.then_some(&app.sampler.rates),
+        chat_views: &mut app.chat_views,
+        tab_streams,
     };
     app.content_rect = ui.max_rect();
     let Some(tab) = app.tabs.get_mut(active) else { return };

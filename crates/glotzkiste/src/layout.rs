@@ -12,10 +12,28 @@ pub struct StreamPane {
     pub id: u64,
 }
 
+/// Which channels a chat pane shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ChatMode {
+    /// Only `channel`.
+    #[default]
+    One,
+    /// These channels merged into one list.
+    Several(Vec<String>),
+    /// Every stream in the tab, merged (follows the tab).
+    AllStreams,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Pane {
     Stream(StreamPane),
-    Chat { channel: String },
+    Chat {
+        /// The single channel (`ChatMode::One`), and the fallback otherwise.
+        channel: String,
+        /// Layouts saved before combined chats load as `One`.
+        #[serde(default)]
+        mode: ChatMode,
+    },
     Empty,
 }
 
@@ -23,6 +41,30 @@ impl Pane {
     pub fn stream(channel: &str) -> Self {
         Pane::Stream(StreamPane { channel: channel.to_owned(), quality: Quality::Auto, volume: 80.0, id: 0 })
     }
+
+    pub fn chat(channel: &str) -> Self {
+        Pane::Chat { channel: channel.to_owned(), mode: ChatMode::One }
+    }
+}
+
+/// The channels a chat pane shows, given the tab's streams (deduplicated,
+/// in order).
+pub fn chat_channels(channel: &str, mode: &ChatMode, tab_streams: &[String]) -> Vec<String> {
+    let list: Vec<String> = match mode {
+        ChatMode::One => vec![channel.to_owned()],
+        ChatMode::Several(list) => list.clone(),
+        ChatMode::AllStreams => tab_streams.to_vec(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for c in list {
+        if !c.is_empty() && !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    if out.is_empty() && !channel.is_empty() {
+        out.push(channel.to_owned());
+    }
+    out
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -144,7 +186,7 @@ impl Tab {
         };
         let root = match chat {
             Some(c) => {
-                let chat = tiles.insert_pane(Pane::Chat { channel: c });
+                let chat = tiles.insert_pane(Pane::chat(&c));
                 let lin = Linear::new_binary(LinearDir::Horizontal, [body, chat], 0.78);
                 tiles.insert_container(Container::Linear(lin))
             }
@@ -214,7 +256,7 @@ impl Tab {
 
     /// Adds a chat for `channel` to the right of its stream tile.
     pub fn add_chat_beside(&mut self, stream_tile: TileId, channel: &str) {
-        let chat = self.tree.tiles.insert_pane(Pane::Chat { channel: channel.to_owned() });
+        let chat = self.tree.tiles.insert_pane(Pane::chat(channel));
         let parent = self.tree.tiles.parent_of(stream_tile);
         let lin = Linear::new_binary(LinearDir::Horizontal, [stream_tile, chat], 0.75);
         let group = self.tree.tiles.insert_container(Container::Linear(lin));
@@ -335,6 +377,24 @@ mod tests {
         t.add_stream("b");
         assert_eq!(streams(&t), ["a", "b"]);
         assert!(t.has_chat());
+    }
+
+    #[test]
+    fn chat_modes_resolve_channels() {
+        let tab = vec!["a".to_owned(), "b".to_owned(), "a".to_owned()];
+        assert_eq!(chat_channels("x", &ChatMode::One, &tab), ["x"]);
+        assert_eq!(chat_channels("x", &ChatMode::AllStreams, &tab), ["a", "b"]);
+        assert_eq!(chat_channels("x", &ChatMode::Several(vec!["b".into(), "c".into()]), &tab), ["b", "c"]);
+        // An empty selection falls back to the pane's channel.
+        assert_eq!(chat_channels("x", &ChatMode::Several(vec![]), &tab), ["x"]);
+        assert_eq!(chat_channels("x", &ChatMode::AllStreams, &[]), ["x"]);
+    }
+
+    #[test]
+    fn old_chat_panes_still_load() {
+        let old = r#"{"Chat":{"channel":"somebody"}}"#;
+        let p: Pane = serde_json::from_str(old).unwrap();
+        assert!(matches!(p, Pane::Chat { ref channel, mode: ChatMode::One } if channel == "somebody"));
     }
 
     #[test]
