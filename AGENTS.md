@@ -7,6 +7,7 @@ Read `E:/Development/AGENTS.md` and `E:/Development/general-agent-rules.md` firs
 - **Private:** no remote and no publication without the owner's yes. Commit only as `rennerdo30 <9086097+rennerdo30@users.noreply.github.com>`. No AI attribution lines.
 - **Secrets:** the viewer's login token is a credential. Code stores it only DPAPI-protected (`CryptProtectData`, current user) and never logs or prints it. Agents never read, print or commit a real token or cookie file; tests use fake tokens.
 - **Pair Desk:** project `glotzkiste` (prefix `GK`) once it exists; until then the plan lives in `docs/DESIGN.md` milestones.
+- **No subagents, no parallel jobs** (owner, 2026-11-15: "NO PARALLEL JOBS NO SUBAGENTS!"): the main session builds this project itself, one step at a time, on `main`.
 - Paths: always `E:`; `D:` is the same drive. Branch limit: an active branch has a commit in the last 24 h; up to 10 is normal, 11 to 20 needs a recorded reason, 20 is the maximum.
 
 ## Performance rules (owner, 2026-11-15, adapted from Nitrate's)

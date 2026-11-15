@@ -21,7 +21,7 @@ A multi-stream live viewer: tabs, each tab a free tile layout of stream and chat
 
 ## 2. Crates and contracts
 
-Workspace crates own disjoint directories. Public APIs below are the contracts between parallel jobs; change one only with the main's agreement.
+Public APIs below are the contracts between crates.
 
 ### `gk-mpv` (from Nitrate, done)
 libmpv loaded at runtime, `Mpv` client handle, `RenderContext::new_d3d11`, `render_d3d11(texture)`, update callback. `Libmpv::load_from(&[path])` loads the extracted embedded DLL.
@@ -62,6 +62,6 @@ libmpv loaded at runtime, `Mpv` client handle, `RenderContext::new_d3d11`, `rend
 
 ## 3. Milestones
 
-1. **M1 Foundations (parallel):** A `gk-render` + app skeleton playing N channels from the command line in a 2×2 tile layout; B `gk-twitch`; C `gk-chat`.
+1. **M1 Foundations (in order, no parallel jobs):** `gk-twitch` playback, then `gk-render` + app skeleton playing N channels from the command line in a 2×2 tile layout, then `gk-chat`.
 2. **M2 The viewer:** tabs, tile editor and presets, chat pane with emotes and badges, login, quality and audio focus, persistence.
 3. **M3 Polish and proof:** smoke numbers for 1, 4 and 4 + 2 chats; review; release build for the friend.
