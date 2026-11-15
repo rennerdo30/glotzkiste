@@ -29,6 +29,16 @@ pub const RENDER_PARAM_API_TYPE: c_int = 1;
 pub const RENDER_PARAM_D3D11_INIT_PARAMS: c_int = 21;
 pub const RENDER_PARAM_D3D11_FBO: c_int = 22;
 pub const RENDER_PARAM_BLOCK_FOR_TARGET_TIME: c_int = 12;
+pub const RENDER_PARAM_NEXT_FRAME_INFO: c_int = 11;
+pub const FRAME_INFO_PRESENT: u64 = 1;
+pub const FRAME_INFO_REDRAW: u64 = 2;
+
+#[repr(C)]
+#[derive(Default)]
+pub struct FrameInfo {
+    pub flags: u64,
+    pub target_time: i64,
+}
 pub const RENDER_UPDATE_FRAME: u64 = 1;
 
 #[repr(C)]
@@ -124,6 +134,8 @@ pub struct Api {
     pub render_context_render: unsafe extern "C" fn(*mut RenderContext, *mut RenderParam) -> c_int,
     pub render_context_report_swap: unsafe extern "C" fn(*mut RenderContext),
     pub render_context_free: unsafe extern "C" fn(*mut RenderContext),
+    pub render_context_get_info: unsafe extern "C" fn(*mut RenderContext, RenderParam) -> c_int,
+    pub get_time_ns: unsafe extern "C" fn(*mut Handle) -> i64,
     pub stream_cb_add_ro: unsafe extern "C" fn(*mut Handle, *const c_char, *mut c_void, StreamOpenFn) -> c_int,
 }
 
@@ -164,6 +176,8 @@ impl Api {
             render_context_render: sym!("mpv_render_context_render"),
             render_context_report_swap: sym!("mpv_render_context_report_swap"),
             render_context_free: sym!("mpv_render_context_free"),
+            render_context_get_info: sym!("mpv_render_context_get_info"),
+            get_time_ns: sym!("mpv_get_time_ns"),
             stream_cb_add_ro: sym!("mpv_stream_cb_add_ro"),
         })
     }

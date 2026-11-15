@@ -92,6 +92,43 @@ pub struct Status {
     pub video_height: i64,
 }
 
+/// True while the stats window is open: stream threads then sample mpv
+/// twice a second. Closed, the stats cost nothing.
+pub static STATS_ON: AtomicBool = AtomicBool::new(false);
+
+/// Detailed numbers for the stats window (sampled only while it is open).
+#[derive(Debug, Clone, Default)]
+pub struct StreamStats {
+    pub sampled: Option<Instant>,
+    /// Frames per second leaving the decoder/filters (mpv's estimate).
+    pub decoded_fps: f64,
+    /// The stream's own frame rate.
+    pub source_fps: f64,
+    /// Frames dropped to keep sync (video output).
+    pub drops_vo: i64,
+    /// Frames the decoder dropped.
+    pub drops_decoder: i64,
+    /// Frames shown late.
+    pub delayed: i64,
+    /// Frames shown at the wrong time.
+    pub mistimed: i64,
+    pub width: i64,
+    pub height: i64,
+    pub codec: String,
+    pub hwdec: String,
+    pub video_kbps: f64,
+    pub audio_kbps: f64,
+    /// What arrives from the network right now.
+    pub download_kbps: f64,
+    pub cache_s: f64,
+    pub pipe_s: f64,
+    pub speed: f64,
+    pub container: String,
+    pub segments_done: u64,
+    pub segments_skipped: u64,
+    pub reopens: u64,
+}
+
 /// Shared by every stream thread.
 #[derive(Clone)]
 pub struct Env {
@@ -118,6 +155,7 @@ pub struct StreamHandle {
     tx: Sender<Cmd>,
     mpv: Arc<OnceLock<Mpv>>,
     status: Arc<Mutex<Status>>,
+    stats: Arc<Mutex<StreamStats>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -126,8 +164,10 @@ impl StreamHandle {
         let (tx, rx) = mpsc::channel();
         let mpv = Arc::new(OnceLock::new());
         let status = Arc::new(Mutex::new(Status::default()));
+        let stats = Arc::new(Mutex::new(StreamStats::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let ctl = Control {
+            stats: stats.clone(),
             id,
             channel: channel.clone(),
             env,
@@ -147,7 +187,11 @@ impl StreamHandle {
             }
             presenter.remove_stream(id);
         });
-        Self { id, channel, tx, mpv, status, stop }
+        Self { id, channel, tx, mpv, status, stats, stop }
+    }
+
+    pub fn stats(&self) -> StreamStats {
+        self.stats.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
     pub fn send(&self, cmd: Cmd) {
@@ -188,6 +232,7 @@ struct Control {
     rx: Receiver<Cmd>,
     mpv_slot: Arc<OnceLock<Mpv>>,
     status: Arc<Mutex<Status>>,
+    stats: Arc<Mutex<StreamStats>>,
     stop: Arc<AtomicBool>,
     posted: Status,
     last_post: Instant,
@@ -419,6 +464,7 @@ impl Control {
         let mut speed = 1.0f64;
         let mut last_control = Instant::now();
         let mut refreshing_since: Option<Instant> = None;
+        let mut last_sample: Option<(Instant, u64)> = None;
         loop {
             // Commands first: they must act at once.
             loop {
@@ -552,6 +598,47 @@ impl Control {
                 let variants = feed.variants();
                 let cur = variants.get(st.variant).map(|v| v.name.clone()).unwrap_or_default();
                 let tenths = (behind * 10.0).round().clamp(0.0, 999.0) as u32;
+                if STATS_ON.load(Ordering::Relaxed) && last_sample.is_none_or(|(t, _)| t.elapsed() >= Duration::from_millis(500)) {
+                    let now = Instant::now();
+                    let bytes = feed.bytes_received();
+                    let download_kbps = match last_sample {
+                        Some((t, b)) => (bytes.saturating_sub(b)) as f64 * 8.0 / 1000.0 / now.duration_since(t).as_secs_f64().max(0.001),
+                        None => 0.0,
+                    };
+                    last_sample = Some((now, bytes));
+                    let d = |n: &str| mpv.get_double(n).unwrap_or(0.0);
+                    let i = |n: &str| mpv.get_i64(n).unwrap_or(0);
+                    let snap = StreamStats {
+                        sampled: Some(now),
+                        decoded_fps: d("estimated-vf-fps"),
+                        // Low-latency probing often leaves the container rate
+                        // unknown; the playlist states it.
+                        source_fps: Some(d("container-fps")).filter(|f| *f > 0.0).unwrap_or_else(|| {
+                            variants.get(st.variant).map(|v| f64::from(v.fps)).unwrap_or(0.0)
+                        }),
+                        drops_vo: i("frame-drop-count"),
+                        drops_decoder: i("decoder-frame-drop-count"),
+                        delayed: i("vo-delayed-frame-count"),
+                        mistimed: i("mistimed-frame-count"),
+                        width: i("video-params/w"),
+                        height: i("video-params/h"),
+                        codec: mpv.get_string("video-format").unwrap_or_default(),
+                        hwdec: mpv.get_string("hwdec-current").unwrap_or_default(),
+                        video_kbps: d("video-bitrate") / 1000.0,
+                        audio_kbps: d("audio-bitrate") / 1000.0,
+                        download_kbps,
+                        cache_s: cache,
+                        pipe_s: feed.buffered_secs(),
+                        speed,
+                        container: format!("{:?}", st.container),
+                        segments_done: st.segments_done,
+                        segments_skipped: st.segments_skipped,
+                        reopens: st.epoch,
+                    };
+                    if let Ok(mut s) = self.stats.lock() {
+                        *s = snap;
+                    }
+                }
                 self.set(|s| {
                     s.buffer_tenths = tenths;
                     s.speed_up = speed > 1.0;

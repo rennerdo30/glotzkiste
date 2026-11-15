@@ -37,6 +37,9 @@ struct Behavior<'a> {
     ppp: f32,
     acts: Vec<Act>,
     add_text: &'a mut String,
+    rects: Vec<super::stats::TileRect>,
+    /// Stats on the tiles themselves.
+    overlay: Option<&'a super::stats::Rates>,
 }
 
 fn latency_color(tenths: u32) -> Color32 {
@@ -77,6 +80,14 @@ impl Behavior<'_> {
             self.heights.push((p.id, (px[3] - px[1]).max(1) as u32));
         }
         let audible = self.audio.as_deref() == Some(p.channel.as_str());
+        if let (Some(rates), Some(h)) = (self.overlay, handle) {
+            let area = Rect::from_min_max(pos2(rect.min.x + 8.0, rect.min.y + 42.0), pos2(rect.max.x - 8.0, rect.max.y - 8.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::bottom_up(egui::Align::Min)));
+            child.set_clip_rect(rect);
+            egui::Frame::NONE.fill(Color32::from_black_alpha(190)).corner_radius(6).inner_margin(8).show(&mut child, |ui| {
+                super::stats::stream_table(ui, ("tile-stats", p.id), &st, &h.stats(), rates, p.id);
+            });
+        }
         let info = self.info.get(&p.channel);
         let name = info.map(|i| i.display_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| p.channel.clone());
 
@@ -253,6 +264,12 @@ impl Behavior<'_> {
 
 impl egui_tiles::Behavior<Pane> for Behavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile: TileId, pane: &mut Pane) -> UiResponse {
+        let kind = match pane {
+            Pane::Stream(p) => super::stats::TileKind::Stream { id: p.id, channel: p.channel.clone() },
+            Pane::Chat { channel } => super::stats::TileKind::Chat { channel: channel.clone() },
+            Pane::Empty => super::stats::TileKind::Empty,
+        };
+        self.rects.push(super::stats::TileRect { rect: ui.max_rect(), kind });
         match pane {
             Pane::Stream(p) => self.stream_ui(ui, tile, p),
             Pane::Chat { channel } => {
@@ -309,7 +326,10 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
         ppp,
         acts: Vec::new(),
         add_text: &mut app.add_text,
+        rects: Vec::new(),
+        overlay: app.stats_on_tiles.then_some(&app.sampler.rates),
     };
+    app.content_rect = ui.max_rect();
     let Some(tab) = app.tabs.get_mut(active) else { return };
     // A maximized tile fills the tab; the others keep running.
     let max_pane = app.maximized.filter(|id| matches!(tab.tree.tiles.get(*id), Some(egui_tiles::Tile::Pane(_))));
@@ -322,7 +342,9 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
         tab.tree.ui(&mut b, ui);
     }
     let acts = std::mem::take(&mut b.acts);
+    let rects = std::mem::take(&mut b.rects);
     drop(b);
+    app.tile_rects = rects;
     for a in acts {
         match a {
             Act::Remove(id) => {

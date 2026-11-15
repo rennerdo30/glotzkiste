@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod browsers;
 mod chat_state;
 mod fonts;
 mod images;
@@ -30,6 +31,8 @@ Usage: glotzkiste [options] [CHANNEL...]
   --snapshot FILE   With --smoke: save a PNG of the window at the end
   --size WxH        Window size in pixels (default 1600x900)
   --pointer X,Y     With --smoke: a virtual mouse at X,Y (points), for snapshots
+  --stats           Open the stats window
+  --login           Open the login dialog
   --state-dir DIR   Keep the saved layout in DIR (smoke runs save only then)
 
 Channels on the command line open in a new tab next to the restored ones.
@@ -46,6 +49,8 @@ pub struct Options {
     pub size: Option<(u32, u32)>,
     pub pointer: Option<(f32, f32)>,
     pub state_dir: Option<std::path::PathBuf>,
+    pub stats: bool,
+    pub login: bool,
 }
 
 fn parse(args: &[String]) -> Result<Option<Options>, String> {
@@ -56,6 +61,8 @@ fn parse(args: &[String]) -> Result<Option<Options>, String> {
             "--help" | "-h" => return Ok(None),
             "--mute" => o.mute = true,
             "--chat" => o.chat = true,
+            "--stats" => o.stats = true,
+            "--login" => o.login = true,
             "--smoke" => {
                 o.smoke = Some(
                     it.next().and_then(|s| s.parse::<f64>().ok()).filter(|s| *s > 0.0 && *s <= 600.0).ok_or("--smoke needs seconds (up to 600)")?,

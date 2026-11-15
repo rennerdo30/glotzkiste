@@ -2,6 +2,7 @@
 //! tile area and the login dialog. Runs only inside an egui pass.
 
 pub mod chat;
+pub mod stats;
 mod tiles;
 
 use crate::app::App;
@@ -73,6 +74,25 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, heigh
     if app.login.open {
         login_dialog(app, ui.ctx());
     }
+    if app.stats_open || app.stats_on_tiles {
+        // Numbers refresh twice a second while shown; closed, nothing ticks.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    }
+    if app.stats_open {
+        let ids: Vec<u64> = app.streams.keys().copied().collect();
+        let c = stats::Ctx {
+            rects: &app.tile_rects,
+            content: app.content_rect,
+            statuses: ids.iter().filter_map(|id| Some((*id, app.streams.get(id)?.status()))).collect(),
+            stats: ids.iter().filter_map(|id| Some((*id, app.streams.get(id)?.stats()))).collect(),
+            chat_lines: app.chat.channels.iter().map(|(k, v)| (k.clone(), v.buffer.len())).collect(),
+            rates: &app.sampler.rates,
+            adapter: &app.adapter,
+            open: &mut app.stats_open,
+            on_tiles: &mut app.stats_on_tiles,
+        };
+        stats::window(ui.ctx(), c);
+    }
 }
 
 fn shortcuts(app: &mut App, ui: &egui::Ui) {
@@ -101,6 +121,9 @@ fn shortcuts(app: &mut App, ui: &egui::Ui) {
         }
         if !typing && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
             app.maximized = None;
+        }
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::F3) {
+            app.stats_open = !app.stats_open;
         }
     });
 }
@@ -168,6 +191,10 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
         // Right side, laid out right to left.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             account_button(app, ui);
+            let stats_text = RichText::new("📊 Stats").color(if app.stats_open { TEXT } else { MUTED });
+            if ui.add(egui::Button::new(stats_text).fill(if app.stats_open { RAISED } else { Color32::TRANSPARENT })).on_hover_text("Stream stats (F3)").clicked() {
+                app.stats_open = !app.stats_open;
+            }
             ui.menu_button(RichText::new(format!("⚡ {}", app.latency.label())), |ui| {
                 ui.label(RichText::new("How close to live").color(MUTED));
                 for l in [Latency::Ultra, Latency::Low, Latency::Smooth] {
@@ -269,62 +296,139 @@ fn account_button(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+fn step(ui: &mut egui::Ui, n: usize, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal_top(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), egui::Sense::hover());
+        ui.painter().circle_filled(r.center(), 11.0, ACCENT);
+        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, n.to_string(), crate::fonts::bold(13.0), TEXT);
+        ui.vertical(|ui| {
+            ui.label(RichText::new(title).font(crate::fonts::bold(14.0)).color(TEXT));
+            add(ui);
+        });
+    });
+    ui.add_space(6.0);
+}
+
 fn login_dialog(app: &mut App, ctx: &egui::Context) {
+    use crate::app::LoginMode;
+    app.detect_browsers();
     let mut open = true;
-    egui::Window::new("Your Twitch account")
+    egui::Window::new("Log in with Twitch")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
-        .default_width(460.0)
+        .default_width(560.0)
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.set_max_width(460.0);
+            ui.set_width(560.0);
             if let Some(a) = app.auth.clone() {
-                ui.label(RichText::new(format!("Logged in as {}", a.login)).size(18.0).color(TEXT));
-                let turbo = app.streams.values().any(|s| s.status().turbo);
-                let ads = app.streams.values().any(|s| s.status().ads_expected);
-                ui.label(if turbo {
-                    RichText::new("Turbo is active: streams play without ads.").color(GOOD)
-                } else if app.streams.is_empty() {
-                    RichText::new("Open a stream to see whether this account plays without ads.").color(MUTED)
-                } else if ads {
-                    RichText::new("This account has no Turbo: Twitch sends ads, and Glotzkiste skips them (the picture holds during a break).").color(WARN)
-                } else {
-                    RichText::new("No ads on the open streams.").color(GOOD)
-                });
-                ui.add_space(8.0);
-                if ui.button("Log out").clicked() {
-                    app.logout();
+                logged_in_view(app, ui, &a);
+                return;
+            }
+            ui.horizontal_wrapped(|ui| {
+                for b in ["✔ No ads with Turbo", "✔ Chat as yourself", "✔ Your live channels, one click away"] {
+                    ui.label(RichText::new(b).color(GOOD));
+                    ui.add_space(8.0);
                 }
-            } else {
-                ui.label(RichText::new("Log in with your browser session").size(18.0).color(TEXT));
-                ui.label(RichText::new(
-                    "With Turbo, streams play without ads; logged in, you can also chat. Glotzkiste uses the login your browser already has:",
-                ).color(MUTED));
-                ui.add_space(4.0);
-                ui.label("1. Open twitch.tv in your browser, logged in.");
-                ui.label("2. Export its cookies as cookies.txt (any \"cookies.txt\" browser extension), or copy the value of the auth-token cookie.");
-                ui.label("3. Choose the file below, or paste the file's text or the token.");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(!app.login.busy, egui::Button::new("Choose cookies.txt…").fill(ACCENT)).clicked() {
-                        app.pick_cookie_file();
-                    }
-                    if app.login.busy {
-                        ui.spinner();
+            });
+            ui.label(RichText::new("Glotzkiste borrows the login your browser already has. Your password never touches it.").color(MUTED));
+            ui.add_space(8.0);
+
+            // Which browser: installed ones only, default first.
+            let browsers = app.login.browsers.clone().unwrap_or_default();
+            if !browsers.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Your browser:").color(MUTED));
+                    for (i, b) in browsers.iter().enumerate() {
+                        let label = if b.default { format!("{} ★", b.kind.name()) } else { b.kind.name().to_owned() };
+                        let sel = app.login.browser == i;
+                        let r = ui.add(egui::Button::new(RichText::new(label).color(if sel { TEXT } else { MUTED })).fill(if sel { RAISED } else { Color32::TRANSPARENT }).stroke(if sel { Stroke::new(1.0, ACCENT) } else { Stroke::NONE }));
+                        let r = if b.default { r.on_hover_text("Your default browser") } else { r };
+                        if r.clicked() {
+                            app.login.browser = i;
+                        }
                     }
                 });
-                ui.add_space(4.0);
-                ui.add(egui::TextEdit::multiline(&mut app.login.paste).hint_text("…or paste here").password(true).desired_rows(2).desired_width(f32::INFINITY));
-                if ui.add_enabled(!app.login.busy && !app.login.paste.trim().is_empty(), egui::Button::new("Log in")).clicked() {
-                    let text = app.login.paste.clone();
+            }
+            let browser = browsers.get(app.login.browser).cloned();
+            let kind = browser.as_ref().map(|b| b.kind).unwrap_or(crate::browsers::Kind::Chrome);
+            let bname = browser.as_ref().map(|b| b.kind.name()).unwrap_or("your browser");
+
+            // Two ways in.
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut app.login.mode, LoginMode::Extension, "With an extension (easiest)");
+                ui.selectable_value(&mut app.login.mode, LoginMode::DevTools, "Without installing anything");
+            });
+            ui.separator();
+            match app.login.mode {
+                LoginMode::Extension => {
+                    step(ui, 1, "Install \"Get cookies.txt LOCALLY\"", |ui| {
+                        ui.label(RichText::new("Open source (MIT), exports only when you click, never sends anything anywhere.").color(MUTED).size(12.0));
+                        ui.horizontal(|ui| {
+                            if ui.add(egui::Button::new(format!("Open the store in {bname}")).fill(ACCENT)).clicked() {
+                                crate::browsers::open(browser.as_ref(), kind.store_url(), ui.ctx());
+                            }
+                            if ui.link("Source code").clicked() {
+                                crate::browsers::open(browser.as_ref(), crate::browsers::SOURCE, ui.ctx());
+                            }
+                        });
+                        if let Some(note) = kind.store_note() {
+                            ui.label(RichText::new(note).color(WARN).size(12.0));
+                        }
+                    });
+                    step(ui, 2, "Open twitch.tv, logged in", |ui| {
+                        if ui.button(format!("Open twitch.tv in {bname}")).clicked() {
+                            crate::browsers::open(browser.as_ref(), "https://www.twitch.tv/", ui.ctx());
+                        }
+                    });
+                    step(ui, 3, "Copy your cookies", |ui| {
+                        ui.label("Click the extensions button (the puzzle piece) next to the address bar, then Get cookies.txt LOCALLY.");
+                        ui.label("Keep the format on Netscape and press Copy.");
+                        ui.label(RichText::new("(Or Export, then drop the file on this window.)").color(MUTED).size(12.0));
+                    });
+                    step(ui, 4, "Paste them here", |_| {});
+                }
+                LoginMode::DevTools => {
+                    step(ui, 1, "Open twitch.tv, logged in", |ui| {
+                        if ui.button(format!("Open twitch.tv in {bname}")).clicked() {
+                            crate::browsers::open(browser.as_ref(), "https://www.twitch.tv/", ui.ctx());
+                        }
+                    });
+                    step(ui, 2, "Press F12 to open the developer tools", |ui| {
+                        ui.label(format!("Go to {}.", kind.devtools_path()));
+                    });
+                    step(ui, 3, "Copy the auth-token value", |ui| {
+                        ui.label("Find the row auth-token, double-click its Value and press Ctrl+C.");
+                        ui.label(RichText::new("It is about 30 letters and digits. Treat it like a password.").color(MUTED).size(12.0));
+                    });
+                    step(ui, 4, "Paste it here", |_| {});
+                }
+            }
+            ui.horizontal(|ui| {
+                let te = egui::TextEdit::singleline(&mut app.login.paste).hint_text("Paste here (hidden)").password(true).desired_width(330.0);
+                let r = ui.add(te);
+                let go = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let can = !app.login.busy && !app.login.paste.trim().is_empty();
+                if (ui.add_enabled(can, egui::Button::new("Log in").fill(ACCENT)).clicked() || (go && can)) && !app.login.busy {
+                    let text = std::mem::take(&mut app.login.paste);
                     app.start_login(text);
                 }
-                ui.add_space(6.0);
-                ui.label(RichText::new("The login stays on this PC, encrypted for your Windows user, and is only sent to Twitch.").color(MUTED).size(12.0));
-            }
+                if ui.add_enabled(!app.login.busy, egui::Button::new("Choose file…")).on_hover_text("An exported cookies.txt").clicked() {
+                    app.pick_cookie_file();
+                }
+                if app.login.busy {
+                    ui.spinner();
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Only the twitch.tv login is used. It is kept in Windows Credential Manager (encrypted for your Windows user, on this PC only) and only ever sent to Twitch.")
+                    .color(MUTED)
+                    .size(12.0),
+            );
             if let Some((ok, m)) = &app.login.message {
-                ui.add_space(6.0);
+                ui.add_space(4.0);
                 ui.label(RichText::new(m).color(if *ok { GOOD } else { BAD }));
             }
         });
@@ -335,5 +439,44 @@ fn login_dialog(app: &mut App, ctx: &egui::Context) {
     }
     if !open {
         app.login.open = false;
+    }
+}
+
+fn logged_in_view(app: &mut App, ui: &mut egui::Ui, a: &gk_twitch::Auth) {
+    ui.label(RichText::new(format!("Logged in as {}", a.login)).size(18.0).color(TEXT));
+    let turbo = app.streams.values().any(|s| s.status().turbo);
+    let ads = app.streams.values().any(|s| s.status().ads_expected);
+    ui.label(if turbo {
+        RichText::new("✔ Turbo is active: streams play without ads.").color(GOOD)
+    } else if app.streams.is_empty() {
+        RichText::new("Open a stream to see whether this account plays without ads.").color(MUTED)
+    } else if ads {
+        RichText::new("This account has no Turbo, so Twitch sends ads. Glotzkiste skips them; the picture holds during a break.").color(WARN)
+    } else {
+        RichText::new("✔ No ads on the open streams.").color(GOOD)
+    });
+    let identity = a.user_agent.as_deref().and_then(crate::app::ua_label).map(|l| format!("✔ Requests look like your browser ({l})")).unwrap_or_else(|| "Requests use a standard browser identity".into());
+    ui.label(RichText::new(identity).color(if a.user_agent.is_some() { GOOD } else { MUTED }));
+    if a.device_id.is_some() {
+        ui.label(RichText::new("✔ Same device as your browser session").color(GOOD));
+    }
+    ui.label(RichText::new("Stored in Windows Credential Manager as Glotzkiste/twitch.").color(MUTED).size(12.0));
+    if let Some(p) = app.login.imported_file.clone() {
+        ui.add_space(6.0);
+        egui::Frame::NONE.fill(RAISED).corner_radius(6).inner_margin(8).show(ui, |ui| {
+            ui.label(RichText::new("The exported cookies file still holds your whole browser session:").color(WARN));
+            ui.label(RichText::new(p.display().to_string()).color(MUTED).size(12.0));
+            if ui.add(egui::Button::new("Delete that file now").fill(ACCENT)).clicked() {
+                app.delete_imported_file();
+            }
+        });
+    }
+    ui.add_space(8.0);
+    if ui.button("Log out").clicked() {
+        app.logout();
+    }
+    if let Some((ok, m)) = &app.login.message {
+        ui.add_space(4.0);
+        ui.label(RichText::new(m).color(if *ok { GOOD } else { BAD }));
     }
 }

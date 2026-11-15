@@ -100,6 +100,28 @@ impl RenderContext {
         if code < 0 { Err(client::error(&self.mpv.lib, code)) } else { Ok(()) }
     }
 
+    /// When the next frame should be shown, in mpv's clock (see
+    /// [`RenderContext::time_ns`]). This build of mpv reports nanoseconds,
+    /// although render.h still says microseconds (measured 2026-11-15).
+    ///  `None`: no frame queued, or one that is
+    /// not timed (a redraw), which is drawn at once.
+    pub fn next_frame_due(&mut self) -> Option<i64> {
+        let mut info = ffi::FrameInfo::default();
+        let param = ffi::RenderParam { kind: ffi::RENDER_PARAM_NEXT_FRAME_INFO, data: (&mut info as *mut ffi::FrameInfo).cast() };
+        // SAFETY: valid context; `info` matches mpv_render_frame_info.
+        let code = unsafe { (self.mpv.lib.api.render_context_get_info)(self.ctx, param) };
+        if code < 0 || info.flags & ffi::FRAME_INFO_PRESENT == 0 || info.flags & ffi::FRAME_INFO_REDRAW != 0 || info.target_time <= 0 {
+            return None;
+        }
+        Some(info.target_time)
+    }
+
+    /// mpv's clock in nanoseconds (the base of frame target times).
+    pub fn time_ns(&self) -> i64 {
+        // SAFETY: valid handle.
+        unsafe { (self.mpv.lib.api.get_time_ns)(self.mpv.handle) }
+    }
+
     /// Tells mpv a frame was presented (for its frame timing).
     pub fn report_swap(&mut self) {
         // SAFETY: valid context.

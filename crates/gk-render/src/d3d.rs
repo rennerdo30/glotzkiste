@@ -181,6 +181,29 @@ struct Surface {
     render: RenderContext,
     tex: Option<(ID3D11Texture2D, ID3D11ShaderResourceView, (u32, u32))>,
     has_frame: bool,
+    /// mpv asked for a render that has not happened yet.
+    pending: bool,
+    /// When the pending frame is due, in mpv's clock (nanoseconds).
+    due_ns: Option<i64>,
+    /// A new frame went into the texture since the last present.
+    fresh: bool,
+}
+
+/// Frames are drawn this long before their display time: the next present
+/// (at most one refresh later) then shows them on time.
+const HEADROOM_NS: i64 = 1_500_000;
+/// A due time further away than this is not trusted: draw at once.
+const MAX_WAIT_NS: i64 = 1_000_000_000;
+
+/// Nanoseconds to wait before drawing a frame due at `due`.
+fn wait_ns(due: Option<i64>, now: i64) -> i64 {
+    match due {
+        Some(d) => {
+            let w = d - HEADROOM_NS - now;
+            if w > MAX_WAIT_NS { 0 } else { w }
+        }
+        None => 0,
+    }
 }
 
 struct Anim {
@@ -334,6 +357,18 @@ impl Renderer {
             .map(Duration::from_millis)
     }
 
+    /// Time until the earliest stream frame is due.
+    fn video_deadline(&mut self) -> Option<Duration> {
+        let mut best: Option<i64> = None;
+        for s in self.surfaces.values_mut() {
+            if s.pending && s.due_ns.is_some() {
+                let wait = wait_ns(s.due_ns, s.render.time_ns());
+                best = Some(best.map_or(wait, |b| b.min(wait)));
+            }
+        }
+        best.map(|ns| Duration::from_nanos(ns.max(0) as u64))
+    }
+
     fn run(mut self, shared: &Shared, stats: &Stats) {
         let mut need_wait_for_swap = true;
         loop {
@@ -345,7 +380,11 @@ impl Renderer {
                     if r.pending() || shared.video_dirty.load(Ordering::Acquire) {
                         break;
                     }
-                    match self.anim_deadline() {
+                    let deadline = match (self.anim_deadline(), self.video_deadline()) {
+                        (Some(a), Some(v)) => Some(a.min(v)),
+                        (a, v) => a.or(v),
+                    };
+                    match deadline {
                         Some(d) => {
                             let (g, t) = shared.wake.wait_timeout(r, d).unwrap_or_else(|p| p.into_inner());
                             r = g;
@@ -433,8 +472,10 @@ impl Renderer {
                 stats.ui_frames.fetch_add(1, Ordering::Relaxed);
                 draw = true;
             }
-            // 3. Streams: render every new frame into its tile texture.
-            if shared.video_dirty.swap(false, Ordering::AcqRel) && self.render_streams(stats) {
+            // 3. Streams: render every frame that is due into its tile
+            //    texture; frames due later wait for their time.
+            let poked = shared.video_dirty.swap(false, Ordering::AcqRel);
+            if self.render_streams(stats, poked) {
                 draw = true;
             }
             // 4. Animations whose frame changed.
@@ -474,25 +515,30 @@ impl Renderer {
             Ok(mut render) => {
                 let shared = self.shared.clone();
                 render.set_update_callback(move || shared.poke_video());
-                self.surfaces.insert(id, Surface { render, tex: None, has_frame: false });
+                self.surfaces.insert(id, Surface { render, tex: None, has_frame: false, pending: true, due_ns: None, fresh: false });
                 self.shared.video_dirty.store(true, Ordering::Release);
             }
             Err(e) => log::error!("stream {id}: render context failed: {e}"),
         }
     }
 
-    /// Renders new frames of all streams. True if anything visible changed.
-    fn render_streams(&mut self, stats: &Stats) -> bool {
+    /// Renders the stream frames that are due. True if anything visible
+    /// changed. `poked`: an mpv update callback fired since the last call.
+    fn render_streams(&mut self, stats: &Stats, poked: bool) -> bool {
         let mut changed = false;
         let videos = self.videos.clone();
         for (id, s) in self.surfaces.iter_mut() {
-            let flags = s.render.update();
+            if poked && RenderContext::frame_ready(s.render.update()) {
+                s.pending = true;
+                s.due_ns = s.render.next_frame_due();
+            }
             let tile = videos.iter().find(|v| v.id == *id);
             // Size the texture to the tile; hidden streams get a tiny one
             // so mpv's frame queue keeps moving at almost no cost.
             let want = tile.map(|t| t.size()).unwrap_or((16, 16));
             let resized = s.tex.as_ref().map(|t| t.2) != Some(want);
-            if !RenderContext::frame_ready(flags) && !(resized && s.has_frame) {
+            let due = s.pending && wait_ns(s.due_ns, s.render.time_ns()) <= 0;
+            if !due && !(resized && s.has_frame) {
                 continue;
             }
             if resized {
@@ -509,12 +555,17 @@ impl Renderer {
                 match unsafe { s.render.render_d3d11(tex.as_raw(), false) } {
                     Ok(()) => {
                         s.has_frame = true;
-                        stats.video_frames.fetch_add(1, Ordering::Relaxed);
-                        if let Ok(mut t) = stats.tiles.lock() {
-                            let e = t.entry(*id).or_default();
-                            e.frames += 1;
-                            (e.width, e.height) = *size;
-                            e.visible = tile.is_some();
+                        if due {
+                            s.pending = false;
+                            s.due_ns = None;
+                            s.fresh = true;
+                            stats.video_frames.fetch_add(1, Ordering::Relaxed);
+                            if let Ok(mut t) = stats.tiles.lock() {
+                                let e = t.entry(*id).or_default();
+                                e.frames += 1;
+                                (e.width, e.height) = *size;
+                                e.visible = tile.is_some();
+                            }
                         }
                         changed |= tile.is_some();
                     }
@@ -522,8 +573,6 @@ impl Renderer {
                 }
             }
         }
-        // Streams whose tile size changed but that have no new frame yet are
-        // handled above (re-render of the current frame).
         changed
     }
 
@@ -587,8 +636,11 @@ impl Renderer {
                 let _ = reply.send(write_snapshot(&self.device, &self.context, &tex, &path));
             }
             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok().map_err(e)?;
+            // Only streams whose new frame this present showed.
             for s in self.surfaces.values_mut() {
-                s.render.report_swap();
+                if std::mem::take(&mut s.fresh) {
+                    s.render.report_swap();
+                }
             }
         }
         Ok(())
@@ -697,6 +749,16 @@ mod tests {
     fn anim(delays: &[u32]) -> Anim {
         // Views are not needed for timing; build with dummy-free logic.
         Anim { frames: Vec::new(), total_ms: delays.iter().map(|d| u64::from(*d)).sum() }
+    }
+
+    #[test]
+    fn frame_waits_are_bounded() {
+        let now = 10_000_000_000;
+        assert_eq!(wait_ns(None, now), 0);
+        assert_eq!(wait_ns(Some(now + 11_500_000), now), 10_000_000);
+        assert!(wait_ns(Some(now - 5), now) < 0);
+        // A wildly wrong clock (a unit mix-up) never stalls the video.
+        assert_eq!(wait_ns(Some(now * 1000), now), 0);
     }
 
     #[test]

@@ -29,12 +29,26 @@ pub enum UserEvent {
 type LibSlot = Arc<Mutex<Option<Result<Arc<gk_mpv::Libmpv>, String>>>>;
 type Slot<T> = Arc<Mutex<Option<T>>>;
 
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum LoginMode {
+    #[default]
+    Extension,
+    DevTools,
+}
+
 #[derive(Default)]
 pub struct LoginDialog {
     pub open: bool,
     pub paste: String,
     pub busy: bool,
     pub message: Option<(bool, String)>,
+    pub mode: LoginMode,
+    /// Installed browsers (default first), once detected.
+    pub browsers: Option<Vec<crate::browsers::Browser>>,
+    pub browser: usize,
+    /// A cookies file the login came from: it holds the whole browser
+    /// session, so the dialog offers to delete it.
+    pub imported_file: Option<std::path::PathBuf>,
 }
 
 pub struct App {
@@ -60,7 +74,8 @@ pub struct App {
     pub(crate) chat: ChatState,
     pub(crate) images: Images,
     pub(crate) login: LoginDialog,
-    login_result: Slot<Result<Auth, String>>,
+    login_result: Slot<(Result<Auth, String>, Option<std::path::PathBuf>)>,
+    browsers_slot: Slot<Vec<crate::browsers::Browser>>,
     pub(crate) add_text: String,
     pub(crate) followed: Vec<ChannelInfo>,
     followed_slot: Slot<Result<Vec<ChannelInfo>, String>>,
@@ -71,6 +86,12 @@ pub struct App {
     info_at: Option<Instant>,
     fonts_slot: Slot<egui::FontDefinitions>,
     pub(crate) renaming: Option<usize>,
+    pub(crate) stats_open: bool,
+    pub(crate) stats_on_tiles: bool,
+    pub(crate) sampler: crate::ui::stats::Sampler,
+    pub(crate) tile_rects: Vec<crate::ui::stats::TileRect>,
+    pub(crate) content_rect: egui::Rect,
+    pub(crate) adapter: String,
     pub(crate) error: Option<String>,
     saved_json: String,
     save_check: Instant,
@@ -104,6 +125,27 @@ pub fn run(options: Options) -> i32 {
     app.save_now();
     app.streams.clear();
     app.exit_code
+}
+
+/// Checks the token and attaches the browser identity (user agent from the
+/// browser's version, device id from its cookie). Runs on a worker.
+fn finish_login(http: &Http, found: gk_twitch::auth::LoginInput, browser: Option<&crate::browsers::Browser>) -> Result<Auth, String> {
+    let mut a = gk_twitch::auth::validate(http, &found.token).map_err(|e| e.to_string())?;
+    a.device_id = found.device_id;
+    a.user_agent = browser.and_then(crate::browsers::user_agent).map(|(ua, _)| ua);
+    Ok(a)
+}
+
+/// "Chrome 142" from a user agent we built.
+pub fn ua_label(ua: &str) -> Option<String> {
+    let find = |key: &str| ua.split(key).nth(1).map(|r| r.split('.').next().unwrap_or_default().to_owned());
+    if let Some(v) = find("Edg/") {
+        Some(format!("Edge {v}"))
+    } else if let Some(v) = find("Firefox/") {
+        Some(format!("Firefox {v}"))
+    } else {
+        find("Chrome/").map(|v| format!("Chrome {v}"))
+    }
 }
 
 fn wake_fn(proxy: &EventLoopProxy<UserEvent>) -> Arc<dyn Fn() + Send + Sync> {
@@ -144,7 +186,7 @@ impl App {
         let smoke = options.smoke.is_some();
         // Smoke runs never use the viewer's account or saved layout.
         let auth = if smoke { None } else { gk_twitch::auth::store::load() };
-        let http = Http::new();
+        let http = auth.as_ref().and_then(|a| a.user_agent.as_deref()).map(Http::with_user_agent).unwrap_or_default();
         let client = Arc::new(Mutex::new(Client::new(http.clone(), auth.clone())));
         let creds = auth.as_ref().map(|a| gk_chat::Credentials { login: a.login.clone(), token: a.token.clone() });
         let chat = ChatState::new(creds, pool.clone(), client.clone(), wake.clone());
@@ -180,7 +222,8 @@ impl App {
         active = active.min(tabs.len() - 1);
         let ctx = egui::Context::default();
         crate::ui::style(&ctx);
-        Self {
+        let stats_open = options.stats;
+        let mut app = Self {
             smoke_until: options.smoke.map(|s| Instant::now() + Duration::from_secs_f64(s)),
             options,
             proxy,
@@ -205,6 +248,7 @@ impl App {
             images,
             login: LoginDialog::default(),
             login_result: Arc::default(),
+            browsers_slot: Arc::default(),
             add_text: String::new(),
             followed: Vec::new(),
             followed_slot: Arc::default(),
@@ -215,6 +259,12 @@ impl App {
             info_at: None,
             fonts_slot,
             renaming: None,
+            stats_open: false,
+            stats_on_tiles: false,
+            sampler: Default::default(),
+            tile_rects: Vec::new(),
+            content_rect: egui::Rect::NOTHING,
+            adapter: String::new(),
             error: None,
             saved_json: String::new(),
             save_check: Instant::now(),
@@ -227,7 +277,10 @@ impl App {
             passes: 0,
             pass_us: 0,
             exit_code: 0,
-        }
+        };
+        app.stats_open = stats_open;
+        app.login.open = app.options.login;
+        app
     }
 
     fn lib(&self) -> Option<Arc<gk_mpv::Libmpv>> {
@@ -321,26 +374,61 @@ impl App {
         self.maximized = None;
     }
 
+    /// The browser picked in the login dialog (else the default one).
+    fn login_browser(&self) -> Option<crate::browsers::Browser> {
+        self.login.browsers.as_ref().and_then(|b| b.get(self.login.browser).or_else(|| b.first()).cloned())
+    }
+
     pub(crate) fn start_login(&mut self, input: String) {
-        let Some(token) = gk_twitch::auth::parse_token_input(&input) else {
-            self.login.message = Some((false, "No Twitch login found in that. Use a cookies.txt from twitch.tv or the auth-token value.".into()));
+        let Some(found) = gk_twitch::auth::parse_login_input(&input) else {
+            self.login.message = Some((false, "No Twitch login in that. Paste the auth-token value, or what the extension copied.".into()));
             return;
         };
         self.login.busy = true;
         self.login.message = None;
+        let browser = self.login_browser();
         let (slot, wake, http) = (self.login_result.clone(), self.wake(), self.client.lock().map(|c| c.http().clone()).unwrap_or_default());
         self.pool.spawn(move || {
-            let r = gk_twitch::auth::validate(&http, &token).map_err(|e| e.to_string());
+            let r = finish_login(&http, found, browser.as_ref());
             if let Ok(a) = &r
                 && let Err(e) = gk_twitch::auth::store::save(a)
             {
                 log::warn!("could not store the login: {e}");
             }
             if let Ok(mut s) = slot.lock() {
-                *s = Some(r);
+                *s = Some((r, None));
             }
             wake();
         });
+    }
+
+    /// Finds the installed browsers once (registry, on a worker).
+    pub(crate) fn detect_browsers(&mut self) {
+        if self.login.browsers.is_some() {
+            return;
+        }
+        self.login.browsers = Some(Vec::new());
+        let (slot, wake) = (self.browsers_slot.clone(), self.wake());
+        self.pool.spawn(move || {
+            let list = crate::browsers::detect();
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(list);
+            }
+            wake();
+        });
+    }
+
+    /// Deletes the cookies file the login came from.
+    pub(crate) fn delete_imported_file(&mut self) {
+        let Some(path) = self.login.imported_file.take() else { return };
+        let wake = self.wake();
+        self.pool.spawn(move || {
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("deleting {}: {e}", path.display());
+            }
+            wake();
+        });
+        self.login.message = Some((true, "Deleted the cookies file.".into()));
     }
 
     pub(crate) fn pick_cookie_file(&mut self) {
@@ -354,15 +442,17 @@ impl App {
         self.login.busy = true;
         self.login.message = None;
         let http = self.client.lock().map(|c| c.http().clone()).unwrap_or_default();
+        let browser = self.login_browser();
         self.pool.spawn(move || {
             let file = path.or_else(|| rfd::FileDialog::new().set_title("Your Twitch cookies (cookies.txt)").add_filter("Cookies", &["txt", "json"]).pick_file());
+            let used = file.clone();
             let r = match file {
                 None => Err(String::new()),
                 Some(path) => match std::fs::read_to_string(&path) {
                     Err(e) => Err(format!("Could not read the file: {e}")),
-                    Ok(text) => match gk_twitch::auth::parse_token_input(&text) {
-                        None => Err("That file has no Twitch login (auth-token cookie for twitch.tv).".into()),
-                        Some(token) => gk_twitch::auth::validate(&http, &token).map_err(|e| e.to_string()).inspect(|a| {
+                    Ok(text) => match gk_twitch::auth::parse_login_input(&text) {
+                        None => Err("That file has no Twitch login. Export it while twitch.tv is open and you are logged in.".into()),
+                        Some(found) => finish_login(&http, found, browser.as_ref()).inspect(|a| {
                             if let Err(e) = gk_twitch::auth::store::save(a) {
                                 log::warn!("could not store the login: {e}");
                             }
@@ -370,8 +460,9 @@ impl App {
                     },
                 },
             };
+            let used = used.filter(|_| r.is_ok());
             if let Ok(mut s) = slot.lock() {
-                *s = Some(r);
+                *s = Some((r, used));
             }
             wake();
         });
@@ -385,7 +476,8 @@ impl App {
 
     fn apply_auth(&mut self, auth: Option<Auth>) {
         self.auth = auth.clone();
-        let http = self.client.lock().map(|c| c.http().clone()).unwrap_or_default();
+        // Requests identify as the viewer's browser from now on.
+        let http = auth.as_ref().and_then(|a| a.user_agent.as_deref()).map(Http::with_user_agent).unwrap_or_default();
         if let Ok(mut c) = self.client.lock() {
             *c = Client::new(http, auth.clone());
         }
@@ -452,8 +544,15 @@ impl App {
                 ch.view.invalidate();
             }
         }
-        if let Some(r) = self.login_result.lock().ok().and_then(|mut s| s.take()) {
+        if let Some(list) = self.browsers_slot.lock().ok().and_then(|mut s| s.take()) {
+            self.login.browsers = Some(list);
+            self.login.browser = 0;
+        }
+        if let Some((r, file)) = self.login_result.lock().ok().and_then(|mut s| s.take()) {
             self.login.busy = false;
+            if file.is_some() {
+                self.login.imported_file = file;
+            }
             match r {
                 Ok(a) => {
                     self.login.message = Some((true, format!("Logged in as {}.", a.login)));
@@ -560,6 +659,11 @@ impl App {
         let mut videos: Vec<VideoTile> = Vec::new();
         let mut heights: Vec<(u64, u32)> = Vec::new();
         self.images.frame += 1;
+        let stats_shown = self.stats_open || self.stats_on_tiles;
+        crate::stream::STATS_ON.store(stats_shown, std::sync::atomic::Ordering::Relaxed);
+        if stats_shown && let Some(p) = &self.presenter {
+            self.sampler.sample(&p.stats(), self.passes, self.pass_us);
+        }
         let ctx = self.ctx.clone();
         let full = ctx.run_ui(raw, |ui| {
             crate::ui::draw(self, ui, &mut videos, &mut heights);
@@ -706,6 +810,7 @@ impl ApplicationHandler<UserEvent> for App {
         match Presenter::start(hwnd, (size.width, size.height)) {
             Ok((p, info)) => {
                 log::info!("adapter: {} software={}", info.adapter, info.software);
+                self.adapter = if info.software { format!("{} (software)", info.adapter) } else { info.adapter.clone() };
                 p.set_clear_color(crate::ui::BG_LINEAR);
                 self.presenter = Some(Arc::new(p));
             }
