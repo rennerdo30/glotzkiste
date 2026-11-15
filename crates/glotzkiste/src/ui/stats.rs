@@ -37,6 +37,8 @@ pub struct Rates {
     pub ram_mb: f64,
     /// Frames drawn into each stream's tile per second.
     pub tile_fps: HashMap<u64, f64>,
+    /// Repeat and redraw renders per second (no new picture).
+    pub tile_extra: HashMap<u64, (f64, f64)>,
     pub tiles: HashMap<u64, TileStats>,
 }
 
@@ -49,6 +51,7 @@ struct Snap {
     anim: u64,
     cpu_100ns: u64,
     tiles: HashMap<u64, u64>,
+    extra: HashMap<u64, (u64, u64)>,
 }
 
 #[derive(Default)]
@@ -103,6 +106,7 @@ impl Sampler {
             anim: ld(&st.anim_redraws),
             cpu_100ns: cpu,
             tiles: tiles.iter().map(|(k, v)| (*k, v.frames)).collect(),
+            extra: tiles.iter().map(|(k, v)| (*k, (v.repeats, v.redraws))).collect(),
         };
         if let Some(l) = &self.last {
             let dt = now.at.duration_since(l.at).as_secs_f64().max(0.001);
@@ -120,6 +124,14 @@ impl Sampler {
                 cpu_pct: now.cpu_100ns.saturating_sub(l.cpu_100ns) as f64 / 100_000.0 / dt / cores,
                 ram_mb: ram as f64 / (1024.0 * 1024.0),
                 tile_fps: now.tiles.iter().map(|(k, f)| (*k, per(*f, l.tiles.get(k).copied().unwrap_or(*f)))).collect(),
+                tile_extra: now
+                    .extra
+                    .iter()
+                    .map(|(k, (rp, rd))| {
+                        let (lrp, lrd) = l.extra.get(k).copied().unwrap_or((*rp, *rd));
+                        (*k, (per(*rp, lrp), per(*rd, lrd)))
+                    })
+                    .collect(),
                 tiles,
             };
         }
@@ -166,15 +178,21 @@ pub fn stream_table(ui: &mut egui::Ui, id_salt: impl std::hash::Hash + std::fmt:
         // Frames that reached the screen, against the stream's own rate.
         let tile = rates.tiles.get(&stream_id).copied().unwrap_or_default();
         let shown = rates.tile_fps.get(&stream_id).copied().unwrap_or(0.0);
+        // While catching up (speed above 1) more frames per second are right.
+        let expected = s.source_fps * s.speed.max(0.5);
         let fps_color = if s.source_fps <= 0.0 || !tile.visible {
             TEXT
-        } else if shown >= s.source_fps * 0.95 && shown <= s.source_fps * 1.05 {
+        } else if shown >= expected * 0.95 && shown <= expected * 1.05 {
             GOOD
         } else {
             WARN
         };
         let decoder = if s.decoded_fps > 0.0 { format!(" · decoder {:.1}", s.decoded_fps) } else { String::new() };
         row(ui, "Frames", RichText::new(format!("{shown:.1} of {:.0} fps shown{decoder}", s.source_fps)).color(fps_color));
+        let (repeats, redraws) = rates.tile_extra.get(&stream_id).copied().unwrap_or((0.0, 0.0));
+        if repeats + redraws >= 0.5 {
+            row(ui, "Extra renders", RichText::new(format!("{repeats:.1} repeats/s · {redraws:.1} redraws/s")).color(MUTED));
+        }
         let viewport = if tile.visible { format!("{}×{} px", tile.width, tile.height) } else { "hidden (not decoding video)".into() };
         row(ui, "Viewport", plain(viewport));
         let drops = s.drops_vo + s.drops_decoder;

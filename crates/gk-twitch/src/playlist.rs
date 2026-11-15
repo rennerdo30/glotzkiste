@@ -79,12 +79,21 @@ pub fn parse_master(text: &str) -> Vec<Variant> {
 }
 
 /// The smallest video variant at least `tile_height` pixels tall (or the
-/// best one if none is), never audio-only.
+/// best one if none is), never audio-only. A stream offered at 50+ fps keeps
+/// that frame rate (Twitch's 480p and below are 30 fps): smooth motion
+/// matters more than pixels, except in tiny tiles.
 pub fn pick_for_height(variants: &[Variant], tile_height: u32) -> Option<&Variant> {
     let video: Vec<&Variant> = variants.iter().filter(|v| !v.audio_only()).collect();
+    let max_fps = video.iter().map(|v| v.fps).fold(0.0f32, f32::max);
+    let pool: Vec<&Variant> = if max_fps >= 50.0 && tile_height >= 300 {
+        video.iter().copied().filter(|v| v.fps >= 50.0).collect()
+    } else {
+        video.clone()
+    };
+    let pool = if pool.is_empty() { video } else { pool };
     // Allow 10 % upscaling before stepping up a quality.
     let need = tile_height.saturating_mul(9) / 10;
-    video.iter().rev().find(|v| v.height >= need).or_else(|| video.first()).copied()
+    pool.iter().rev().find(|v| v.height >= need).or_else(|| pool.first()).copied()
 }
 
 #[cfg(test)]
@@ -120,7 +129,11 @@ https://a/audio.m3u8
     fn picks_the_smallest_variant_that_fills_the_tile() {
         let v = parse_master(MASTER);
         assert_eq!(pick_for_height(&v, 540).map(|v| v.name.as_str()), Some("720p60"));
-        assert_eq!(pick_for_height(&v, 500).map(|v| v.name.as_str()), Some("480p"));
+        // 480p is 30 fps on a 60 fps stream: 720p60 keeps the motion smooth.
+        assert_eq!(pick_for_height(&v, 500).map(|v| v.name.as_str()), Some("720p60"));
+        assert_eq!(pick_for_height(&v, 320).map(|v| v.name.as_str()), Some("720p60"));
+        // Tiny tiles may drop to 30 fps.
+        assert_eq!(pick_for_height(&v, 280).map(|v| v.name.as_str()), Some("480p"));
         assert_eq!(pick_for_height(&v, 1080).map(|v| v.name.as_str()), Some("1080p60"));
         assert_eq!(pick_for_height(&v, 2160).map(|v| v.name.as_str()), Some("1080p60"));
         assert_eq!(pick_for_height(&v, 100).map(|v| v.name.as_str()), Some("160p"));

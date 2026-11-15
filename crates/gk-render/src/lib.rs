@@ -70,6 +70,9 @@ pub struct TileStats {
     pub height: u32,
     /// The texture is shown in the current UI (else a 16 px placeholder).
     pub visible: bool,
+    /// Renders mpv asked for that were not a new picture.
+    pub repeats: u64,
+    pub redraws: u64,
 }
 
 /// What the render thread reports once it is up.

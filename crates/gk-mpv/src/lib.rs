@@ -92,7 +92,7 @@ mod render;
 mod stream;
 
 pub use client::{EndReason, Error, Event, Format, Mpv, Value};
-pub use render::RenderContext;
+pub use render::{FrameKind, NextFrame, RenderContext};
 pub use stream::{OpenFn, StreamReader};
 
 /// A loaded libmpv.

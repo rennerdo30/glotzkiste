@@ -6,6 +6,15 @@ use std::io::Write;
 use std::path::PathBuf;
 
 fn main() {
+    // The exe icon (Explorer, Alt-Tab); the window and taskbar icons are
+    // loaded from this same resource at runtime.
+    println!("cargo:rerun-if-changed=glotzkiste.rc");
+    println!("cargo:rerun-if-changed=../../assets/logo/glotzkiste.ico");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && let Err(e) = embed_resource::compile("glotzkiste.rc", embed_resource::NONE).manifest_optional()
+    {
+        println!("cargo:warning=exe icon not embedded: {e}");
+    }
     println!("cargo:rerun-if-env-changed=GK_LIBMPV");
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let dest = out.join("libmpv.zst");

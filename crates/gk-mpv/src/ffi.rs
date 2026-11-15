@@ -32,6 +32,7 @@ pub const RENDER_PARAM_BLOCK_FOR_TARGET_TIME: c_int = 12;
 pub const RENDER_PARAM_NEXT_FRAME_INFO: c_int = 11;
 pub const FRAME_INFO_PRESENT: u64 = 1;
 pub const FRAME_INFO_REDRAW: u64 = 2;
+pub const FRAME_INFO_REPEAT: u64 = 4;
 
 #[repr(C)]
 #[derive(Default)]

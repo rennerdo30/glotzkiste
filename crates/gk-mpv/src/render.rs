@@ -9,6 +9,26 @@ use std::sync::Arc;
 
 type Callback = Box<dyn Fn() + Send + Sync>;
 
+/// What mpv wants rendered next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameKind {
+    /// Nothing queued (render anyway if an update asked for it).
+    None,
+    /// A new video frame.
+    New,
+    /// The same frame again (display-synced timing); no new picture.
+    Repeat,
+    /// A redraw of the current frame (option change, resize).
+    Redraw,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NextFrame {
+    pub kind: FrameKind,
+    /// When a new frame should be shown, in mpv's clock (ns).
+    pub due_ns: Option<i64>,
+}
+
 /// A render context. Use it from one thread at a time (the render thread).
 pub struct RenderContext {
     mpv: Arc<client::Inner>,
@@ -105,15 +125,23 @@ impl RenderContext {
     /// although render.h still says microseconds (measured 2026-11-15).
     ///  `None`: no frame queued, or one that is
     /// not timed (a redraw), which is drawn at once.
-    pub fn next_frame_due(&mut self) -> Option<i64> {
+    pub fn next_frame(&mut self) -> NextFrame {
         let mut info = ffi::FrameInfo::default();
         let param = ffi::RenderParam { kind: ffi::RENDER_PARAM_NEXT_FRAME_INFO, data: (&mut info as *mut ffi::FrameInfo).cast() };
         // SAFETY: valid context; `info` matches mpv_render_frame_info.
         let code = unsafe { (self.mpv.lib.api.render_context_get_info)(self.ctx, param) };
-        if code < 0 || info.flags & ffi::FRAME_INFO_PRESENT == 0 || info.flags & ffi::FRAME_INFO_REDRAW != 0 || info.target_time <= 0 {
-            return None;
+        if code < 0 || info.flags & ffi::FRAME_INFO_PRESENT == 0 {
+            return NextFrame { kind: FrameKind::None, due_ns: None };
         }
-        Some(info.target_time)
+        let kind = if info.flags & ffi::FRAME_INFO_REDRAW != 0 {
+            FrameKind::Redraw
+        } else if info.flags & ffi::FRAME_INFO_REPEAT != 0 {
+            FrameKind::Repeat
+        } else {
+            FrameKind::New
+        };
+        let due_ns = (kind == FrameKind::New && info.target_time > 0).then_some(info.target_time);
+        NextFrame { kind, due_ns }
     }
 
     /// mpv's clock in nanoseconds (the base of frame target times).

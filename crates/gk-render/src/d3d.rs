@@ -2,7 +2,7 @@
 
 use crate::egui_d3d::{EguiRenderer, create_texture};
 use crate::{ANIM_BIT, AnimFrames, DeviceInfo, Stats, UiFrame, VideoTile};
-use gk_mpv::{Mpv, RenderContext};
+use gk_mpv::{FrameKind, Mpv, RenderContext};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -183,6 +183,7 @@ struct Surface {
     has_frame: bool,
     /// mpv asked for a render that has not happened yet.
     pending: bool,
+    pending_kind: FrameKind,
     /// When the pending frame is due, in mpv's clock (nanoseconds).
     due_ns: Option<i64>,
     /// A new frame went into the texture since the last present.
@@ -515,7 +516,7 @@ impl Renderer {
             Ok(mut render) => {
                 let shared = self.shared.clone();
                 render.set_update_callback(move || shared.poke_video());
-                self.surfaces.insert(id, Surface { render, tex: None, has_frame: false, pending: true, due_ns: None, fresh: false });
+                self.surfaces.insert(id, Surface { render, tex: None, has_frame: false, pending: true, pending_kind: FrameKind::None, due_ns: None, fresh: false });
                 self.shared.video_dirty.store(true, Ordering::Release);
             }
             Err(e) => log::error!("stream {id}: render context failed: {e}"),
@@ -529,8 +530,10 @@ impl Renderer {
         let videos = self.videos.clone();
         for (id, s) in self.surfaces.iter_mut() {
             if poked && RenderContext::frame_ready(s.render.update()) {
+                let next = s.render.next_frame();
                 s.pending = true;
-                s.due_ns = s.render.next_frame_due();
+                s.pending_kind = next.kind;
+                s.due_ns = next.due_ns;
             }
             let tile = videos.iter().find(|v| v.id == *id);
             // Size the texture to the tile; hidden streams get a tiny one
@@ -555,19 +558,29 @@ impl Renderer {
                 match unsafe { s.render.render_d3d11(tex.as_raw(), false) } {
                     Ok(()) => {
                         s.has_frame = true;
+                        let kind = if due { s.pending_kind } else { FrameKind::Redraw };
                         if due {
                             s.pending = false;
                             s.due_ns = None;
+                        }
+                        // Only a new picture counts as a shown frame; a repeat
+                        // changes nothing on screen and needs no present.
+                        let new_picture = matches!(kind, FrameKind::New | FrameKind::None);
+                        if new_picture {
                             s.fresh = true;
                             stats.video_frames.fetch_add(1, Ordering::Relaxed);
-                            if let Ok(mut t) = stats.tiles.lock() {
-                                let e = t.entry(*id).or_default();
-                                e.frames += 1;
-                                (e.width, e.height) = *size;
-                                e.visible = tile.is_some();
-                            }
                         }
-                        changed |= tile.is_some();
+                        if let Ok(mut t) = stats.tiles.lock() {
+                            let e = t.entry(*id).or_default();
+                            match kind {
+                                FrameKind::Repeat => e.repeats += 1,
+                                FrameKind::Redraw => e.redraws += 1,
+                                _ => e.frames += 1,
+                            }
+                            (e.width, e.height) = *size;
+                            e.visible = tile.is_some();
+                        }
+                        changed |= tile.is_some() && kind != FrameKind::Repeat;
                     }
                     Err(e) => log::warn!("stream {id}: render: {e}"),
                 }

@@ -1,0 +1,12 @@
+[package]
+name = "gk-icon"
+description = "Renders assets/logo/glotzkiste.svg into the app icon (.ico, 16-256 px) and a 256 px PNG. Run by hand after changing the logo."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+resvg = "0.50.0"
+ico = "0.6.0"

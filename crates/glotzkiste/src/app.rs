@@ -105,6 +105,9 @@ pub struct App {
     started: Instant,
     passes: u64,
     pass_us: u64,
+    last_pass: Instant,
+    /// At most one UI pass per display refresh.
+    pass_interval: Duration,
     exit_code: i32,
 }
 
@@ -276,6 +279,8 @@ impl App {
             started: Instant::now(),
             passes: 0,
             pass_us: 0,
+            last_pass: Instant::now() - Duration::from_secs(1),
+            pass_interval: Duration::from_micros(16_666),
             exit_code: 0,
         };
         app.stats_open = stats_open;
@@ -729,8 +734,22 @@ impl App {
             ld(&st.busy_us) / 1000,
             ld(&st.slow_waits)
         );
+        let tiles = st.tiles.lock().map(|t| t.clone()).unwrap_or_default();
         let mut ids: Vec<&u64> = self.streams.keys().collect();
         ids.sort();
+        for id in &ids {
+            if let Some(t) = tiles.get(id) {
+                println!(
+                    "frames {id}: new={} ({:.1}/s) repeats={} redraws={} tile={}x{}",
+                    t.frames,
+                    t.frames as f64 / secs,
+                    t.repeats,
+                    t.redraws,
+                    t.width,
+                    t.height
+                );
+            }
+        }
         for id in ids {
             let s = &self.streams[id];
             let st = s.status();
@@ -765,6 +784,14 @@ impl ApplicationHandler<UserEvent> for App {
         use winit::platform::windows::WindowAttributesExtWindows;
         let (w, h) = self.options.size.unwrap_or((1600, 900));
         let mut attrs = Window::default_attributes().with_title("Glotzkiste").with_min_inner_size(LogicalSize::new(480.0, 270.0));
+        {
+            // The exe's own icon resource (build.rs): small for the title
+            // bar, large for the taskbar and Alt-Tab.
+            use winit::platform::windows::IconExtWindows;
+            let small = winit::window::Icon::from_resource(1, Some(PhysicalSize::new(32, 32))).ok();
+            let big = winit::window::Icon::from_resource(1, Some(PhysicalSize::new(256, 256))).ok();
+            attrs = attrs.with_window_icon(small).with_taskbar_icon(big);
+        }
         // Restore the saved place if it is still on a connected monitor.
         let saved = self.geom.filter(|g| {
             self.options.size.is_none()
@@ -817,6 +844,10 @@ impl ApplicationHandler<UserEvent> for App {
             Err(e) => self.error = Some(format!("Video output failed: {e}")),
         }
         let state = egui_winit::State::new(self.ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(8192));
+        // The UI never updates faster than the display can show.
+        if let Some(mhz) = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).filter(|m| *m >= 24_000) {
+            self.pass_interval = Duration::from_micros(1_000_000_000 / u64::from(mhz));
+        }
         self.egui_state = Some(state);
         self.window = Some(window);
         self.needs_pass = true;
@@ -864,14 +895,21 @@ impl ApplicationHandler<UserEvent> for App {
         if self.repaint_at.is_some_and(|t| Instant::now() >= t) {
             self.needs_pass = true;
         }
-        // One pass for everything that arrived since the last one; no frame
-        // loop of our own (AGENTS.md performance rule 3).
+        // One pass for everything that arrived since the last one, and at
+        // most one per display refresh (mouse moves can arrive at 1000 Hz);
+        // no frame loop of our own (AGENTS.md performance rule 3).
+        let mut next = self.smoke_until;
         if self.needs_pass {
-            self.needs_pass = false;
-            self.pass();
+            let ready = self.last_pass + self.pass_interval;
+            if Instant::now() >= ready {
+                self.needs_pass = false;
+                self.last_pass = Instant::now();
+                self.pass();
+            } else {
+                next = Some(next.map_or(ready, |n| n.min(ready)));
+            }
         }
         self.save_soon();
-        let mut next = self.smoke_until;
         if let Some(t) = self.repaint_at {
             next = Some(next.map_or(t, |n| n.min(t)));
         }

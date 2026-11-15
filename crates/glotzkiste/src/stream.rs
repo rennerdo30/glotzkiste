@@ -178,6 +178,7 @@ impl StreamHandle {
             stop: stop.clone(),
             posted: Status::default(),
             last_post: Instant::now() - Duration::from_secs(1),
+            tile_height: 540,
         };
         let name = format!("gk-stream-{id}");
         let _ = std::thread::Builder::new().name(name).spawn(move || {
@@ -236,6 +237,9 @@ struct Control {
     stop: Arc<AtomicBool>,
     posted: Status,
     last_post: Instant,
+    /// The tile's height in pixels, kept across sessions (it may arrive
+    /// before the stream is playing).
+    tile_height: u32,
 }
 
 const P_CACHE: u64 = 1;
@@ -403,7 +407,8 @@ impl Control {
             }
             Cmd::Latency(l) => self.settings.latency = l,
             Cmd::Quality(q) => self.settings.quality = q,
-            Cmd::TileHeight(_) | Cmd::Reload | Cmd::Stop => {}
+            Cmd::TileHeight(h) => self.tile_height = h,
+            Cmd::Reload | Cmd::Stop => {}
         }
     }
 
@@ -439,7 +444,16 @@ impl Control {
                 return Err(Duration::from_secs(5));
             }
         };
-        let mut tile_height: u32 = 540;
+        // Commands that arrived while connecting (the tile size above all).
+        loop {
+            match self.rx.try_recv() {
+                Ok(Cmd::Stop) | Err(TryRecvError::Disconnected) => return Ok(Next::Stop),
+                Ok(Cmd::Reload) => {}
+                Ok(other) => self.apply_setting(mpv, other),
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        let mut tile_height: u32 = self.tile_height;
         let mut pending_height: Option<(u32, Instant)> = None;
         let idx = self.pick(&pb.variants, tile_height);
         let http = self.env.client.lock().map(|c| c.http().clone()).unwrap_or_default();
@@ -493,6 +507,7 @@ impl Control {
                 && since.elapsed() > Duration::from_millis(400)
             {
                 tile_height = h;
+                self.tile_height = h;
                 pending_height = None;
                 if self.settings.quality == Quality::Auto {
                     let i = self.pick(&feed.variants(), tile_height);
