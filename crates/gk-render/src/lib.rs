@@ -57,6 +57,19 @@ pub struct Stats {
     pub busy_us: AtomicU64,
     /// Presents that waited longer than 50 ms on the swap chain.
     pub slow_waits: AtomicU64,
+    /// Per stream: frames drawn into its tile and the tile texture size.
+    pub tiles: std::sync::Mutex<std::collections::HashMap<u64, TileStats>>,
+}
+
+/// What the render thread did for one stream.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TileStats {
+    /// Frames rendered into the stream's tile texture.
+    pub frames: u64,
+    pub width: u32,
+    pub height: u32,
+    /// The texture is shown in the current UI (else a 16 px placeholder).
+    pub visible: bool,
 }
 
 /// What the render thread reports once it is up.

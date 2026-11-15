@@ -224,6 +224,8 @@ struct Shared {
     status: Mutex<FeedStatus>,
     stop: AtomicBool,
     bytes_read: AtomicU64,
+    /// Bytes downloaded into the pipe.
+    bytes_in: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -298,6 +300,7 @@ impl LiveFeed {
             status: Mutex::new(FeedStatus { variant: initial, ..Default::default() }),
             stop: AtomicBool::new(false),
             bytes_read: AtomicU64::new(0),
+            bytes_in: AtomicU64::new(0),
         });
         let mut threads = Vec::new();
         {
@@ -346,6 +349,11 @@ impl LiveFeed {
         let mut st = lock(&self.shared.status);
         st.needs_refresh = false;
         st.last_error = None;
+    }
+
+    /// Total bytes downloaded (for the download rate).
+    pub fn bytes_received(&self) -> u64 {
+        self.shared.bytes_in.load(Ordering::Relaxed)
     }
 
     /// Bytes waiting in the pipe (not yet read by the player).
@@ -728,6 +736,7 @@ fn push(shared: &Shared, bytes: &[u8]) -> bool {
         }
         let n = room.min(rest.len());
         pipe.buf.extend(&rest[..n]);
+        shared.bytes_in.fetch_add(n as u64, Ordering::Relaxed);
         rest = &rest[n..];
         shared.readable.notify_one();
     }
@@ -815,6 +824,7 @@ https://c/12.ts
             status: Mutex::new(FeedStatus::default()),
             stop: AtomicBool::new(false),
             bytes_read: AtomicU64::new(0),
+            bytes_in: AtomicU64::new(0),
         });
         let r = FeedReader { shared: shared.clone(), epoch: 0 };
         let t = std::thread::spawn(move || {

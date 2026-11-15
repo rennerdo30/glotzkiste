@@ -232,6 +232,23 @@ impl Mpv {
         Ok(out)
     }
 
+    /// Reads a string property. Waits for the core: not for the UI thread.
+    pub fn get_string(&self, name: &str) -> Result<String, Error> {
+        let n = cstring(name);
+        let mut out: *mut c_char = std::ptr::null_mut();
+        // SAFETY: FORMAT_STRING writes a char* that we free with mpv_free.
+        check(&self.inner.lib, unsafe {
+            (self.api().get_property)(self.inner.handle, n.as_ptr(), ffi::FORMAT_STRING, (&mut out as *mut *mut c_char).cast())
+        })?;
+        // SAFETY: on success `out` is a NUL-terminated string owned by us.
+        let s = unsafe { string(out) };
+        if !out.is_null() {
+            // SAFETY: allocated by libmpv for this call.
+            unsafe { (self.api().free)(out.cast()) };
+        }
+        Ok(s)
+    }
+
     /// Enables log message events at `level` ("error", "warn", "info", ...).
     pub fn request_log_messages(&self, level: &str) -> Result<(), Error> {
         let l = cstring(level);

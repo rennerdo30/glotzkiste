@@ -387,6 +387,9 @@ impl Renderer {
             }
             for id in req.remove {
                 self.surfaces.remove(&id);
+                if let Ok(mut t) = stats.tiles.lock() {
+                    t.remove(&id);
+                }
                 draw = true;
             }
             for (id, mpv) in req.add {
@@ -501,12 +504,18 @@ impl Renderer {
                     }
                 }
             }
-            if let Some((tex, _, _)) = &s.tex {
+            if let Some((tex, _, size)) = &s.tex {
                 // SAFETY: a render-target texture on mpv's device.
                 match unsafe { s.render.render_d3d11(tex.as_raw(), false) } {
                     Ok(()) => {
                         s.has_frame = true;
                         stats.video_frames.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(mut t) = stats.tiles.lock() {
+                            let e = t.entry(*id).or_default();
+                            e.frames += 1;
+                            (e.width, e.height) = *size;
+                            e.visible = tile.is_some();
+                        }
                         changed |= tile.is_some();
                     }
                     Err(e) => log::warn!("stream {id}: render: {e}"),

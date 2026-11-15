@@ -15,4 +15,4 @@ image.workspace = true
 log.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Security_Credentials"] }

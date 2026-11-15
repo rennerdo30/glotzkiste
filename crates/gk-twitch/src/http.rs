@@ -14,6 +14,7 @@ pub const JSON_LIMIT: u64 = 16 * 1024 * 1024;
 #[derive(Clone)]
 pub struct Http {
     agent: ureq::Agent,
+    user_agent: String,
 }
 
 impl Default for Http {
@@ -33,13 +34,23 @@ pub(crate) fn net(e: ureq::Error) -> Error {
 
 impl Http {
     pub fn new() -> Self {
+        Self::with_user_agent(USER_AGENT)
+    }
+
+    /// A client that identifies as the viewer's own browser.
+    pub fn with_user_agent(user_agent: &str) -> Self {
+        let ua = if user_agent.trim().is_empty() || !user_agent.is_ascii() { USER_AGENT } else { user_agent.trim() };
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
             .timeout_connect(Some(Duration::from_secs(8)))
-            .user_agent(USER_AGENT)
+            .user_agent(ua)
             .max_redirects(4)
             .build();
-        Self { agent: ureq::Agent::new_with_config(config) }
+        Self { agent: ureq::Agent::new_with_config(config), user_agent: ua.to_owned() }
+    }
+
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
     }
 
     pub fn agent(&self) -> &ureq::Agent {

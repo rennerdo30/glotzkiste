@@ -76,7 +76,8 @@ pub fn valid_login(login: &str) -> bool {
 
 impl Client {
     pub fn new(http: Http, auth: Option<Auth>) -> Self {
-        Self { http, auth, device_id: crate::random_hex(32) }
+        let device_id = auth.as_ref().and_then(|a| a.device_id.clone()).unwrap_or_else(|| crate::random_hex(32));
+        Self { http, auth, device_id }
     }
 
     pub fn http(&self) -> &Http {
