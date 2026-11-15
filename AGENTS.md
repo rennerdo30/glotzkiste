@@ -8,7 +8,7 @@ Read `E:/Development/AGENTS.md` and `E:/Development/general-agent-rules.md` firs
 - **Public from day one:** no secrets, no owner-PC config in committed files (`.cargo/config.toml` is local), no third-party code, media or assets. Other services are named only factually where the app needs it (the streaming site it plays, the emote providers), never with their logos or brand art, and the README says the project is not affiliated with them. Screenshots come from `--demo` (generated video, sample chat), never from real streams.
 - **Licences:** MIT. Rust dependencies permissive only (`deny.toml`). libmpv (LGPL) ships as `libmpv-2.dll` next to the exe and is replaceable; packages carry `licenses/` (LGPL text, libmpv notice and source offer).
 - **Secrets:** the viewer's login token is a credential. Code stores it only DPAPI-protected (`CryptProtectData`, current user) and never logs or prints it. Agents never read, print or commit a real token or cookie file; tests use fake tokens.
-- **Pair Desk:** project `glotzkiste` (prefix `GK`) once it exists; until then the plan lives in `docs/DESIGN.md` milestones.
+- **Pair Desk:** project `glotzkiste` (prefix `GK`, created 2026-11-16): open issues, owner checks and the handoff live there; `.pair-desk.json` (local, gitignored) links the repo.
 - **No subagents, no parallel jobs** (owner, 2026-11-15: "NO PARALLEL JOBS NO SUBAGENTS!"): the main session builds this project itself, one step at a time, on `main`.
 - Paths: always `E:`; `D:` is the same drive. Branch limit: an active branch has a commit in the last 24 h; up to 10 is normal, 11 to 20 needs a recorded reason, 20 is the maximum.
 

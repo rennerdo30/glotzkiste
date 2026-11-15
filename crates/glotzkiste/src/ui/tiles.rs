@@ -183,16 +183,11 @@ impl Behavior<'_> {
         // chat, maximize, close.
         let bar = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + 34.0));
         painter.rect_filled(bar, 0.0, Color32::from_black_alpha(185));
+        // The bar senses drags under its buttons too (they only sense
+        // clicks): grab cursor, drag and double-click only on free bar space.
         let drag = ui.interact(bar, ui.scope_id().with(("drag", tile)), Sense::click_and_drag());
-        if drag.drag_started() {
-            response = UiResponse::DragStarted;
-        }
-        if drag.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-        }
-        if drag.double_clicked() {
-            self.acts.push(Act::Maximize(tile));
-        }
+        let ctx = ui.ctx().clone();
+        let over = std::cell::Cell::new(false);
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(bar.shrink2(vec2(8.0, 4.0)))
@@ -208,18 +203,22 @@ impl Behavior<'_> {
                 .on_hover_text(&i.title);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new("✕").frame(false)).on_hover_text("Remove").clicked() {
+            let button = |ui: &mut egui::Ui, text: &str, hint: &str| -> bool {
+                let r = ui.add(egui::Button::new(text).frame(false));
+                over.set(over.get() || r.hovered());
+                if r.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if hint.is_empty() { r.clicked() } else { r.on_hover_text(hint).clicked() }
+            };
+            if button(ui, "✕", "Remove") {
                 self.acts.push(Act::Remove(tile));
             }
             let max_label = if self.maximized == Some(tile) { "🗗" } else { "⛶" };
-            if ui
-                .add(egui::Button::new(max_label).frame(false))
-                .on_hover_text("Maximize in this tab (double-click, Esc)")
-                .clicked()
-            {
+            if button(ui, max_label, "Maximize in this tab (double-click, Esc)") {
                 self.acts.push(Act::Maximize(tile));
             }
-            if ui.add(egui::Button::new("💬").frame(false)).on_hover_text("Open the chat beside it").clicked() {
+            if button(ui, "💬", "Open the chat beside it") {
                 self.acts.push(Act::AddChat(tile, p.channel.clone()));
             }
             // Volume (only for the stream with the sound).
@@ -228,44 +227,47 @@ impl Behavior<'_> {
                 let r = ui
                     .add_sized([80.0, 18.0], egui::Slider::new(&mut v, 0.0..=100.0).show_value(false))
                     .on_hover_text(format!("Volume {v:.0}"));
+                over.set(over.get() || r.hovered() || r.dragged());
                 if r.changed() {
                     p.volume = f64::from(v);
                     if let Some(h) = handle {
                         h.send(Cmd::Volume(p.volume));
                     }
                 }
-                if ui.add(egui::Button::new("🔇").frame(false)).on_hover_text("Mute").clicked() {
+                if button(ui, "🔇", "Mute") {
                     self.acts.push(Act::MuteAll);
                 }
-            } else if ui.add(egui::Button::new("🔈 Listen").frame(false)).clicked() {
+            } else if button(ui, "🔈 Listen", "") {
                 self.acts.push(Act::Audio(p.channel.clone()));
             }
             // Quality.
             let label = quality_label(&p.quality, &st);
-            egui::ComboBox::from_id_salt(("quality", tile)).selected_text(label).width(120.0).show_ui(ui, |ui| {
-                let auto_hint =
-                    if st.current.is_empty() { "Auto".to_owned() } else { format!("Auto ({})", st.current) };
-                if ui
-                    .selectable_label(p.quality == Quality::Auto, auto_hint)
-                    .on_hover_text("Matches the tile size")
-                    .clicked()
-                {
-                    p.quality = Quality::Auto;
-                    if let Some(h) = handle {
-                        h.send(Cmd::Quality(Quality::Auto));
-                    }
-                }
-                for v in &st.variants {
-                    let label = if v == "audio_only" { "Audio only".to_owned() } else { v.clone() };
-                    let q = Quality::Named(v.clone());
-                    if ui.selectable_label(p.quality == q, label).clicked() {
-                        p.quality = q.clone();
+            let combo =
+                egui::ComboBox::from_id_salt(("quality", tile)).selected_text(label).width(120.0).show_ui(ui, |ui| {
+                    let auto_hint =
+                        if st.current.is_empty() { "Auto".to_owned() } else { format!("Auto ({})", st.current) };
+                    if ui
+                        .selectable_label(p.quality == Quality::Auto, auto_hint)
+                        .on_hover_text("Matches the tile size")
+                        .clicked()
+                    {
+                        p.quality = Quality::Auto;
                         if let Some(h) = handle {
-                            h.send(Cmd::Quality(q));
+                            h.send(Cmd::Quality(Quality::Auto));
                         }
                     }
-                }
-            });
+                    for v in &st.variants {
+                        let label = if v == "audio_only" { "Audio only".to_owned() } else { v.clone() };
+                        let q = Quality::Named(v.clone());
+                        if ui.selectable_label(p.quality == q, label).clicked() {
+                            p.quality = q.clone();
+                            if let Some(h) = handle {
+                                h.send(Cmd::Quality(q));
+                            }
+                        }
+                    }
+                });
+            over.set(over.get() || combo.response.hovered());
             // Latency, coloured.
             if matches!(st.state, State::Playing) {
                 let t = st.buffer_tenths;
@@ -279,6 +281,17 @@ impl Behavior<'_> {
                 }
             }
         });
+        if !over.get() {
+            if drag.drag_started() {
+                response = UiResponse::DragStarted;
+            }
+            if drag.hovered() {
+                ctx.set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            if drag.double_clicked() {
+                self.acts.push(Act::Maximize(tile));
+            }
+        }
         response
     }
 

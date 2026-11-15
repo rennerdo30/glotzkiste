@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The tile's top bar shows the grab cursor only on free space; over its buttons the pointing hand, and a drag starting on a button no longer moves the tile (GK-1).
+
 ## 1.0.0
 
 The first release.
