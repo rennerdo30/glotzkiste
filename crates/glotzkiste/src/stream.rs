@@ -6,7 +6,7 @@
 use gk_mpv::{EndReason, Event, Format, Libmpv, Mpv, StreamReader, Value};
 use gk_render::Presenter;
 use gk_twitch::live::{FeedReader, LiveFeed};
-use gk_twitch::playlist::{Variant, pick_for_height};
+use gk_twitch::playlist::Variant;
 use gk_twitch::{Client, Error as TwError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -120,6 +120,14 @@ pub struct Status {
 /// True while the stats window is open: stream threads then sample mpv
 /// twice a second. Closed, the stats cost nothing.
 pub static STATS_ON: AtomicBool = AtomicBool::new(false);
+
+/// The GPU's video decoder is busy (set by the app from the GPU counters):
+/// Auto quality then sizes by tile height alone instead of keeping 60 fps.
+pub static DECODER_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Many tiles are visible: cheaper scaling (mpv's `fast` profile), which
+/// small tiles do not show.
+pub static MANY_TILES: AtomicBool = AtomicBool::new(false);
 
 /// Detailed numbers for the stats window (sampled only while it is open).
 #[derive(Debug, Clone, Default)]
@@ -277,6 +285,26 @@ enum Next {
     Stop,
 }
 
+/// Demo "channels" (`--demo`) start with `~`, which no real channel name can.
+pub fn is_demo(channel: &str) -> bool {
+    channel.starts_with('~')
+}
+
+/// Generated video for a demo channel (mpv's own lavfi sources: no media
+/// files, nothing from anyone else).
+fn demo_source(channel: &str) -> &'static str {
+    match channel {
+        "~aurora" => {
+            "av://lavfi:gradients=size=1280x720:rate=30:speed=0.012:nb_colors=4:c0=0x1e1b4b:c1=0x7c3aed:c2=0x22d3ee:c3=0xf472b6"
+        }
+        "~fractal" => "av://lavfi:mandelbrot=size=1280x720:rate=30",
+        "~life" => {
+            "av://lavfi:life=size=480x270:rate=30:mold=25:ratio=0.12:life_color=#a78bfa:death_color=#1e1b4b,scale=1280:720:flags=neighbor"
+        }
+        _ => "av://lavfi:testsrc2=size=1280x720:rate=30",
+    }
+}
+
 impl Control {
     fn set(&mut self, f: impl FnOnce(&mut Status)) {
         if let Ok(mut s) = self.status.lock() {
@@ -306,6 +334,8 @@ impl Control {
         let mpv = Mpv::create(self.env.lib.clone()).map_err(|e| e.to_string())?;
         let mute = self.settings.muted || self.env.muted_by_flag;
         let volume = format!("{}", self.settings.volume.clamp(0.0, 130.0));
+        // Streams nobody hears decode no audio at all.
+        let aid = if self.settings.muted { "no" } else { "auto" };
         let opts: &[(&str, &str)] = &[
             ("config", "no"),
             ("terminal", "no"),
@@ -325,6 +355,7 @@ impl Control {
             ("audio-buffer", "0.1"),
             ("interpolation", "no"),
             ("mute", if mute { "yes" } else { "no" }),
+            ("aid", aid),
             ("volume", &volume),
         ];
         for (k, v) in opts {
@@ -371,8 +402,15 @@ impl Control {
                 return;
             }
         }
-        self.env.presenter.add_stream(self.id, mpv.clone());
+        // mpv needs its render context before it loads anything.
+        let ready = self.env.presenter.add_stream_ready(self.id, mpv.clone());
+        let _ = ready.recv_timeout(Duration::from_secs(3));
 
+        if is_demo(&self.channel) {
+            self.demo(&mpv);
+            let _ = mpv.command(&["stop"]);
+            return;
+        }
         let mut backoff = Duration::from_secs(2);
         loop {
             match self.session(&mpv, &current) {
@@ -393,6 +431,47 @@ impl Control {
             *c = None;
         }
         let _ = mpv.command(&["stop"]);
+    }
+
+    /// A demo channel: generated video, played until told to stop.
+    fn demo(&mut self, mpv: &Mpv) {
+        self.set(|s| {
+            s.variants = vec!["source".into()];
+            s.current = "source".into();
+            s.low_latency = true;
+        });
+        if let Err(e) = mpv.command(&["loadfile", demo_source(&self.channel)]) {
+            self.set(|s| s.state = State::Error(e.to_string()));
+            return;
+        }
+        loop {
+            loop {
+                match self.rx.try_recv() {
+                    Ok(Cmd::Stop) | Err(TryRecvError::Disconnected) => return,
+                    Ok(Cmd::Reload) | Ok(Cmd::TileHeight(_)) | Ok(Cmd::Quality(_)) => {}
+                    Ok(other) => self.apply_setting(mpv, other),
+                    Err(TryRecvError::Empty) => break,
+                }
+            }
+            if self.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            while let Some(ev) = mpv.wait_event(0.2) {
+                match ev {
+                    Event::PropertyChange { id: P_HEIGHT, value: Value::Int64(h), .. } if h > 0 => {
+                        self.set(|s| {
+                            s.video_height = h;
+                            s.state = State::Playing;
+                            s.buffer_tenths = 2;
+                        });
+                    }
+                    Event::PropertyChange { id: P_DROPS, value: Value::Int64(d), .. } => self.set(|s| s.drops = d),
+                    Event::PropertyChange { id: P_HWDEC, value: Value::String(v), .. } => self.set(|s| s.hwdec = v),
+                    Event::Shutdown => return,
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Waits up to `d` handling commands; false when told to stop.
@@ -429,6 +508,8 @@ impl Control {
                 self.settings.muted = m;
                 let mute = m || self.env.muted_by_flag;
                 let _ = mpv.command(&["set", "mute", if mute { "yes" } else { "no" }]);
+                // Muted streams decode no audio; the audible one gets it back.
+                let _ = mpv.command(&["set", "aid", if m { "no" } else { "auto" }]);
             }
             Cmd::Visible(v) => {
                 let _ = mpv.command(&["set", "vid", if v { "auto" } else { "no" }]);
@@ -448,8 +529,10 @@ impl Control {
     fn pick(&self, variants: &[Variant], tile_height: u32) -> usize {
         match &self.settings.quality {
             Quality::Named(n) => variants.iter().position(|v| &v.name == n),
-            Quality::Auto => pick_for_height(variants, tile_height.max(1))
-                .and_then(|p| variants.iter().position(|v| v.name == p.name)),
+            Quality::Auto => {
+                gk_twitch::playlist::pick(variants, tile_height.max(1), !DECODER_BUSY.load(Ordering::Relaxed))
+                    .and_then(|p| variants.iter().position(|v| v.name == p.name))
+            }
         }
         .unwrap_or(0)
     }
@@ -513,6 +596,13 @@ impl Control {
         let mut last_control = Instant::now();
         let mut refreshing_since: Option<Instant> = None;
         let mut last_sample: Option<(Instant, u64)> = None;
+        let mut busy = DECODER_BUSY.load(Ordering::Relaxed);
+        // Test hook: GK_TEST_RESYNC_AT=<seconds> forces one live-edge resync.
+        let mut test_resync = std::env::var("GK_TEST_RESYNC_AT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|s| Instant::now() + Duration::from_secs_f64(s));
+        let mut fast = false;
         loop {
             // Commands first: they must act at once.
             loop {
@@ -629,9 +719,9 @@ impl Control {
                 let target = self.settings.latency.target();
                 let want = if behind > target + 6.0 {
                     // Far behind (a stall): jump to the live edge.
-                    feed.drop_buffered();
-                    let _ = mpv.command(&["loadfile", &format!("gkfeed://{}", self.id)]);
-                    last_load = Instant::now();
+                    // Cleanly, at a segment boundary: the player reopens on
+                    // the new epoch (see above).
+                    feed.resync();
                     1.0
                 } else if behind > target + 1.5 {
                     1.25
@@ -643,6 +733,29 @@ impl Control {
                 } else {
                     1.0
                 };
+                if test_resync.is_some_and(|t| Instant::now() >= t) {
+                    test_resync = None;
+                    log::warn!("test: resync to the live edge");
+                    feed.resync();
+                }
+                // Decoder load changed: Auto quality may keep 60 fps again,
+                // or has to size by tile height alone.
+                let now_busy = DECODER_BUSY.load(Ordering::Relaxed);
+                if now_busy != busy {
+                    busy = now_busy;
+                    if self.settings.quality == Quality::Auto {
+                        feed.set_variant(self.pick(&feed.variants(), tile_height));
+                    }
+                }
+                let now_fast = MANY_TILES.load(Ordering::Relaxed);
+                if now_fast != fast {
+                    fast = now_fast;
+                    let _ = if fast {
+                        mpv.command(&["apply-profile", "fast"])
+                    } else {
+                        mpv.command(&["apply-profile", "fast", "restore"])
+                    };
+                }
                 if (want - speed).abs() > 1e-6 {
                     speed = want;
                     let _ = mpv.command(&["set", "speed", &format!("{speed}")]);

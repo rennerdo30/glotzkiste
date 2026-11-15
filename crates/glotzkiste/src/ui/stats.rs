@@ -322,6 +322,9 @@ pub struct Ctx<'a> {
 
 fn decoder_label(status: &Status, s: &StreamStats) -> (String, Color32) {
     use crate::stream::DecodeOn;
+    if !matches!(status.state, State::Playing) || status.in_ad {
+        return ("—".into(), MUTED);
+    }
     match status.offloaded {
         Some(DecodeOn::Nvidia) => ("NVIDIA GPU (moved: main decoder full)".into(), WARN),
         Some(DecodeOn::Cpu) => ("CPU (moved: GPU decoder full)".into(), WARN),

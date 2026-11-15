@@ -5,6 +5,7 @@ use crate::workers::Pool;
 use gk_chat::{ChatBuffer, ChatClient, ChatEvent, ChatMessage, Credentials, EmoteLookup, EmoteRef, Span, tokenize};
 use gk_twitch::{Client, Emote};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const HISTORY: usize = 600;
@@ -75,6 +76,75 @@ pub struct ChatState {
     pub last_error: Option<String>,
     /// Bumped when every chat layout must be redone (new emote sets).
     pub generation: u64,
+    /// Sample conversations of demo channels (`--demo`), by channel.
+    demo_feeds: HashMap<String, Arc<AtomicBool>>,
+}
+
+/// A gentle sample conversation for a demo channel: made-up names, plain
+/// text, no emote or badge art from anyone else.
+fn demo_chat(
+    channel: String,
+    queue: Arc<Mutex<Vec<ChatEvent>>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    alive: Arc<AtomicBool>,
+) {
+    const NAMES: [(&str, [u8; 3]); 10] = [
+        ("sunny_otter", [251, 191, 36]),
+        ("pixelpilot", [34, 211, 238]),
+        ("mossbyte", [52, 211, 153]),
+        ("velvetfox", [244, 114, 182]),
+        ("quietkettle", [167, 139, 250]),
+        ("nightowl_42", [96, 165, 250]),
+        ("tinyrobot", [248, 113, 113]),
+        ("lumen", [163, 230, 53]),
+        ("paperplane", [251, 146, 60]),
+        ("cloudberry", [196, 181, 253]),
+    ];
+    const LINES: [&str; 18] = [
+        "this latency is unreal, I see it before my friend on the phone",
+        "four streams and my fans are not even spinning",
+        "the fractal one is hypnotic",
+        "can we get the life one bigger? it looks like a city at night",
+        "how is the chat this smooth with so much going on",
+        "just merged three chats into one, love it",
+        "anyone else watching on two monitors with the stats open?",
+        "gg",
+        "that colour shift on the aurora stream",
+        "first time here, what is this?",
+        "multiview is the only way now",
+        "the spotlight layout is perfect for tournaments",
+        "zero dropped frames, the stats say so",
+        "hello from the couch",
+        "tiles snap so nicely when you drag them",
+        "is that a test pattern? nostalgic",
+        "@pixelpilot same here",
+        "brb getting snacks",
+    ];
+    let _ = std::thread::Builder::new().name(format!("gk-demo-chat-{channel}")).spawn(move || {
+        let mut n: u64 = channel.bytes().map(u64::from).sum();
+        while alive.load(Ordering::Relaxed) {
+            n = n.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let (login, color) = NAMES[(n >> 33) as usize % NAMES.len()];
+            let text = LINES[(n >> 17) as usize % LINES.len()];
+            let msg = ChatMessage {
+                id: format!("demo-{n}"),
+                channel: channel.clone(),
+                login: login.into(),
+                display_name: login.into(),
+                color: Some(color),
+                text: text.into(),
+                ..Default::default()
+            };
+            if let Ok(mut q) = queue.lock() {
+                let was_empty = q.is_empty();
+                q.push(ChatEvent::Message(msg));
+                if was_empty {
+                    wake();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500 + (n >> 50) % 1400));
+        }
+    });
 }
 
 impl ChatState {
@@ -135,6 +205,7 @@ impl ChatState {
             connected: false,
             last_error: None,
             generation: 0,
+            demo_feeds: HashMap::new(),
         }
     }
 
@@ -152,13 +223,23 @@ impl ChatState {
         for c in wanted {
             let ch = self.channels.entry(c.clone()).or_insert_with(ChannelChat::new);
             if !ch.joined {
-                self.client.join(c);
                 ch.joined = true;
+                if crate::stream::is_demo(c) {
+                    let alive = Arc::new(AtomicBool::new(true));
+                    self.demo_feeds.insert(c.clone(), alive.clone());
+                    demo_chat(c.clone(), self.queue.clone(), self.wake.clone(), alive);
+                } else {
+                    self.client.join(c);
+                }
             }
         }
         let gone: Vec<String> = self.channels.keys().filter(|c| !wanted.contains(*c)).cloned().collect();
         for c in gone {
-            self.client.part(&c);
+            if let Some(alive) = self.demo_feeds.remove(&c) {
+                alive.store(false, Ordering::Relaxed);
+            } else {
+                self.client.part(&c);
+            }
             self.channels.remove(&c);
         }
     }

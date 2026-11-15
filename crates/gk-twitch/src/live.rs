@@ -267,6 +267,8 @@ struct Shared {
     bytes_read: AtomicU64,
     /// Bytes downloaded into the pipe.
     bytes_in: AtomicU64,
+    /// Restart at the live edge (set by `resync`, handled by the writer).
+    resync: AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -347,6 +349,7 @@ impl LiveFeed {
             stop: AtomicBool::new(false),
             bytes_read: AtomicU64::new(0),
             bytes_in: AtomicU64::new(0),
+            resync: AtomicBool::new(false),
         });
         let mut threads = Vec::new();
         {
@@ -415,11 +418,13 @@ impl LiveFeed {
         bytes * 8.0 / bw
     }
 
-    /// Drops everything buffered, so playback jumps to the live edge (the
-    /// player must reopen the stream afterwards; see the app's resync).
-    pub fn drop_buffered(&self) {
-        lock(&self.shared.pipe).buf.clear();
+    /// Jumps to the live edge: the current segment is abandoned and the
+    /// byte stream restarts (new epoch, fMP4 init written again) at the
+    /// newest segment boundary. The player reopens on the epoch change.
+    pub fn resync(&self) {
+        self.shared.resync.store(true, Ordering::SeqCst);
         self.shared.writable.notify_all();
+        self.shared.queued.notify_all();
     }
 }
 
@@ -690,13 +695,41 @@ fn writer_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
     // The fMP4 init segment the byte stream currently uses.
     let mut written_init: Option<String> = None;
     let mut init_cache: Option<(String, Vec<u8>)> = None;
-    while let Some((generation, seg)) = next_segment(shared) {
+    while let Some((generation, mut seg)) = next_segment(shared) {
         if seg.seq == u64::MAX {
             break; // end of stream marker
         }
         let current_gen = lock(&shared.control).generation;
         if generation != current_gen {
             continue;
+        }
+        if shared.resync.swap(false, Ordering::SeqCst) {
+            // Skip to the live edge: the first prefetch segment, else the
+            // newest one; never cut into a segment.
+            {
+                let mut q = lock(&shared.queue);
+                let mut all: Vec<(u64, Segment)> =
+                    std::iter::once((generation, seg.clone())).chain(q.drain(..)).collect();
+                let edge = all.iter().position(|(_, s)| s.prefetch).unwrap_or(all.len().saturating_sub(1));
+                let rest = all.split_off(edge);
+                let mut it = rest.into_iter();
+                if let Some((_, first)) = it.next() {
+                    seg = first;
+                }
+                q.extend(it);
+            }
+            let epoch = {
+                let mut p = lock(&shared.pipe);
+                p.buf.clear();
+                p.epoch += 1;
+                p.epoch
+            };
+            shared.readable.notify_all();
+            shared.writable.notify_all();
+            written_init = None;
+            ahead = None;
+            log::info!("resync to segment {} (epoch {epoch})", seg.seq);
+            set_status(shared, cb, |s| s.epoch = epoch);
         }
         if let Some(init_url) = &seg.init
             && written_init.as_deref() != Some(init_url.as_str())
@@ -713,7 +746,8 @@ fn writer_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
                 }
             };
             // A new init mid-stream (fMP4 quality switch): restart the
-            // byte stream; the player reopens it at the new epoch.
+            // byte stream; the player reopens it at the new epoch. (After a
+            // resync the epoch already changed.)
             if written_init.is_some() {
                 let epoch = {
                     let mut p = lock(&shared.pipe);
@@ -761,6 +795,9 @@ fn writer_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
                         stop.store(true, Ordering::Relaxed);
                         return;
                     }
+                    if shared.resync.load(Ordering::SeqCst) {
+                        break; // abandon this segment; the loop restarts at the edge
+                    }
                 }
                 Ok(Err(e)) => {
                     ok = false;
@@ -798,6 +835,9 @@ fn push(shared: &Shared, bytes: &[u8]) -> bool {
     while !rest.is_empty() {
         if shared.stop.load(Ordering::Relaxed) || pipe.closed {
             return false;
+        }
+        if shared.resync.load(Ordering::SeqCst) {
+            return true; // the writer drops this segment
         }
         let room = PIPE_CAPACITY.saturating_sub(pipe.buf.len());
         if room == 0 {
@@ -927,6 +967,7 @@ https://c/10.mp4
             stop: AtomicBool::new(false),
             bytes_read: AtomicU64::new(0),
             bytes_in: AtomicU64::new(0),
+            resync: AtomicBool::new(false),
         });
         let r = FeedReader { shared: shared.clone(), epoch: 0 };
         let t = std::thread::spawn(move || {

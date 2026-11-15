@@ -30,6 +30,7 @@ Usage: glotzkiste [options] [CHANNEL...]
   --mute            Start every stream muted
   --chat            With channels: open the first channel's chat too
   --chat-all        With channels: one chat combining all of them
+  --demo            Generated demo streams and chat (no account, no network)
   --smoke SECS      Run offscreen for SECS seconds, print measurements, exit
   --snapshot FILE   With --smoke: save a PNG of the window at the end
   --size WxH        Window size in pixels (default 1600x900)
@@ -50,6 +51,7 @@ pub struct Options {
     pub mute: bool,
     pub chat: bool,
     pub chat_all: bool,
+    pub demo: bool,
     pub smoke: Option<f64>,
     pub snapshot: Option<std::path::PathBuf>,
     pub size: Option<(u32, u32)>,
@@ -82,6 +84,7 @@ fn parse(args: &[String]) -> Result<Option<Options>, String> {
             "--mute" => o.mute = true,
             "--chat" => o.chat = true,
             "--chat-all" => o.chat_all = true,
+            "--demo" => o.demo = true,
             "--stats" => o.stats = true,
             "--login" => o.login = true,
             "--smoke" => {

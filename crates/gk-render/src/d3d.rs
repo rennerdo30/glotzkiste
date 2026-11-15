@@ -24,7 +24,7 @@ struct Requests {
     /// Texture changes of UI frames that were replaced before being drawn.
     deltas: egui::TexturesDelta,
     size: Option<(u32, u32)>,
-    add: Vec<(u64, Mpv)>,
+    add: Vec<(u64, Mpv, Option<mpsc::Sender<()>>)>,
     remove: Vec<u64>,
     anim_add: Vec<(u64, Arc<AnimFrames>)>,
     anim_remove: Vec<u64>,
@@ -143,7 +143,15 @@ impl Presenter {
     /// Adds a stream; the render thread creates its mpv render context on
     /// the shared device. Its video shows wherever a `VideoTile` names `id`.
     pub fn add_stream(&self, id: u64, mpv: Mpv) {
-        self.shared.update(|r| r.add.push((id, mpv)));
+        self.shared.update(|r| r.add.push((id, mpv, None)));
+    }
+
+    /// Like `add_stream`; the receiver gets a message once the render
+    /// context exists (mpv must not load a file before that).
+    pub fn add_stream_ready(&self, id: u64, mpv: Mpv) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        self.shared.update(|r| r.add.push((id, mpv, Some(tx))));
+        rx
     }
 
     pub fn remove_stream(&self, id: u64) {
@@ -452,8 +460,11 @@ impl Renderer {
                 }
                 draw = true;
             }
-            for (id, mpv) in req.add {
+            for (id, mpv, ready) in req.add {
                 self.add_surface(id, &mpv);
+                if let Some(tx) = ready {
+                    let _ = tx.send(());
+                }
             }
             for id in req.anim_remove {
                 self.anims.remove(&id);

@@ -46,6 +46,17 @@ struct Behavior<'a> {
     tab_streams: Vec<String>,
 }
 
+/// A demo channel's display name ("~aurora" -> "Aurora").
+fn pretty(channel: &str) -> String {
+    match channel.strip_prefix('~') {
+        Some(rest) => {
+            let mut c = rest.chars();
+            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+        }
+        None => channel.to_owned(),
+    }
+}
+
 fn latency_color(tenths: u32) -> Color32 {
     match tenths {
         0..=12 => GOOD,
@@ -106,7 +117,7 @@ impl Behavior<'_> {
             );
         }
         let info = self.info.get(&p.channel);
-        let name = info.map(|i| i.display_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| p.channel.clone());
+        let name = info.map(|i| i.display_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| pretty(&p.channel));
 
         // Centre message for anything but normal playback.
         let msg = match &st.state {

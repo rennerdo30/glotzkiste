@@ -263,7 +263,7 @@ fn layout(
     }
     // In a combined chat every line says where it is from.
     if let Some(c) = tag {
-        f.text(&format!("{c} "), crate::fonts::bold(12.0), dim(channel_color(c)), None);
+        f.text(&format!("{} ", c.trim_start_matches('~')), crate::fonts::bold(12.0), dim(channel_color(c)), None);
     }
     if let Some((who, body)) = &m.reply_to {
         let short: String = body.chars().take(60).collect();

@@ -245,7 +245,7 @@ impl App {
         if let Some(dir) = &options.state_dir {
             crate::layout::set_dir(dir.clone());
         }
-        let persist = !smoke || options.state_dir.is_some();
+        let persist = (!smoke && !options.demo) || options.state_dir.is_some();
         let (mut tabs, mut active, mut latency, mut geom) = (Vec::new(), 0, Latency::Ultra, None);
         if persist && let Some(saved) = crate::layout::load() {
             tabs = saved.tabs;
@@ -270,6 +270,19 @@ impl App {
             }
             tabs.push(tab);
             active = tabs.len() - 1;
+        }
+        if options.demo {
+            // Generated streams and a combined sample chat (README screenshots).
+            let panes = ["~aurora", "~fractal", "~life", "~signal"].iter().map(|c| Pane::stream(c)).collect();
+            let mut tab = Tab::new("Demo", panes);
+            tab.apply(Preset::Spotlight, Some("~aurora".into()));
+            for t in tab.tree.tiles.tiles_mut() {
+                if let egui_tiles::Tile::Pane(Pane::Chat { mode, .. }) = t {
+                    *mode = crate::layout::ChatMode::AllStreams;
+                }
+            }
+            tabs = vec![tab, Tab::new("Esports", vec![]), Tab::new("Chill", vec![])];
+            active = 0;
         }
         if tabs.is_empty() {
             tabs.push(Tab::new("Main", vec![]));
@@ -613,7 +626,17 @@ impl App {
         }
         self.valve.checked = Instant::now();
         let gpus = self.gpus.lock().map(|g| g.clone()).unwrap_or_default();
+        let visible = self.visible.values().filter(|v| **v).count();
+        crate::stream::MANY_TILES.store(visible > 4, std::sync::atomic::Ordering::Relaxed);
         let Some(mine) = gpus.iter().find(|g| g.luid == self.render_luid) else { return };
+        // Busy above 85 %, free again below 60 % (no flapping).
+        let busy = crate::stream::DECODER_BUSY.load(std::sync::atomic::Ordering::Relaxed);
+        if !busy && mine.decode_pct >= 85.0 {
+            log::warn!("video decoder at {:.0} %: Auto quality sizes by tile height now", mine.decode_pct);
+            crate::stream::DECODER_BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
+        } else if busy && mine.decode_pct < 60.0 {
+            crate::stream::DECODER_BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         self.valve.hot = if mine.decode_pct >= 90.0 { self.valve.hot + 1 } else { 0 };
         let on_gpu: Vec<(u64, crate::stream::Status)> = self
             .streams

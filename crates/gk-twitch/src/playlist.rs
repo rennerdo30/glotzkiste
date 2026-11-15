@@ -81,9 +81,15 @@ pub fn parse_master(text: &str) -> Vec<Variant> {
 /// that frame rate (Twitch's 480p and below are 30 fps): smooth motion
 /// matters more than pixels, except in tiny tiles.
 pub fn pick_for_height(variants: &[Variant], tile_height: u32) -> Option<&Variant> {
+    pick(variants, tile_height, true)
+}
+
+/// Like [`pick_for_height`]; `keep_fps` false sizes by height alone (the
+/// video decoder is busy: a 30 fps variant costs half).
+pub fn pick(variants: &[Variant], tile_height: u32, keep_fps: bool) -> Option<&Variant> {
     let video: Vec<&Variant> = variants.iter().filter(|v| !v.audio_only()).collect();
     let max_fps = video.iter().map(|v| v.fps).fold(0.0f32, f32::max);
-    let pool: Vec<&Variant> = if max_fps >= 50.0 && tile_height >= 300 {
+    let pool: Vec<&Variant> = if keep_fps && max_fps >= 50.0 && tile_height >= 300 {
         video.iter().copied().filter(|v| v.fps >= 50.0).collect()
     } else {
         video.clone()
@@ -132,6 +138,9 @@ https://a/audio.m3u8
         assert_eq!(pick_for_height(&v, 320).map(|v| v.name.as_str()), Some("720p60"));
         // Tiny tiles may drop to 30 fps.
         assert_eq!(pick_for_height(&v, 280).map(|v| v.name.as_str()), Some("480p"));
+        // A busy decoder: sized by height alone.
+        assert_eq!(pick(&v, 320, false).map(|v| v.name.as_str()), Some("480p"));
+        assert_eq!(pick(&v, 150, false).map(|v| v.name.as_str()), Some("160p"));
         assert_eq!(pick_for_height(&v, 1080).map(|v| v.name.as_str()), Some("1080p60"));
         assert_eq!(pick_for_height(&v, 2160).map(|v| v.name.as_str()), Some("1080p60"));
         assert_eq!(pick_for_height(&v, 100).map(|v| v.name.as_str()), Some("160p"));
