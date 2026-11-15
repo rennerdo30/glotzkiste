@@ -1,0 +1,10 @@
+[package]
+name = "gk-render"
+description = "D3D11 render thread: stream textures, egui renderer, one present per refresh."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

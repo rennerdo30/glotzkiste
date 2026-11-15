@@ -1,0 +1,5 @@
+/target/
+/.cargo/config.toml
+/artifacts/
+*.log
+/.pair-desk.json

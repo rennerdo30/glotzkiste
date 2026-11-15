@@ -1,0 +1,18 @@
+# Copy to .cargo/config.toml (gitignored). The crt-static flag is required:
+# Glotzkiste ships as one self-contained executable.
+[build]
+rustc-wrapper = "E:/Development/_tools/sccache/0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc/sccache.exe"
+target-dir = "E:/Development/_cache/cargo-target/glotzkiste"
+jobs = 8
+
+[env]
+SCCACHE_DIR = { value = "E:/sccache", force = true }
+# libmpv embedded into the executable (zstd-compressed at build time).
+GK_LIBMPV = { value = "E:/Development/_cache/tools/libmpv/2026-11-13-fe753a7824/extracted/libmpv-2.dll", force = false }
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustflags = ["-C", "target-feature=+crt-static", "-C", "target-cpu=x86-64-v3"]
+
+[net]
+retry = 2
