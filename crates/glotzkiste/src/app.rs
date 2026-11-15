@@ -1,10 +1,14 @@
-//! The window, the egui pass and the model (tabs of tile layouts).
+//! The window, the event loop and the model. Drawing lives in `ui`.
 
-use crate::stream::{Cmd, Env, Latency, Quality, Settings, State, StreamHandle};
 use crate::Options;
+use crate::chat_state::ChatState;
+use crate::images::Images;
+use crate::layout::{Pane, Preset, Tab};
+use crate::stream::{Cmd, Env, Latency, Settings, StreamHandle};
+use crate::workers::Pool;
 use gk_render::{Presenter, UiFrame, VideoTile};
-use gk_twitch::{Client, Http};
-use std::collections::HashMap;
+use gk_twitch::{Auth, ChannelInfo, Client, Http};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -22,52 +26,60 @@ pub enum UserEvent {
     LibReady,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct StreamPane {
-    pub channel: String,
-    pub quality: Quality,
-    pub volume: f64,
-    pub muted: bool,
-    #[serde(skip)]
-    pub id: u64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum Pane {
-    Stream(StreamPane),
-    Chat { channel: String },
-    Empty,
-}
-
-pub struct Tab {
-    pub title: String,
-    pub tree: egui_tiles::Tree<Pane>,
-}
-
 type LibSlot = Arc<Mutex<Option<Result<Arc<gk_mpv::Libmpv>, String>>>>;
+type Slot<T> = Arc<Mutex<Option<T>>>;
 
-struct App {
-    options: Options,
+#[derive(Default)]
+pub struct LoginDialog {
+    pub open: bool,
+    pub paste: String,
+    pub busy: bool,
+    pub message: Option<(bool, String)>,
+}
+
+pub struct App {
+    pub(crate) options: Options,
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Arc<Window>>,
     egui_state: Option<egui_winit::State>,
-    ctx: egui::Context,
-    presenter: Option<Arc<Presenter>>,
+    pub(crate) ctx: egui::Context,
+    pub(crate) presenter: Option<Arc<Presenter>>,
     lib: LibSlot,
-    client: Arc<Mutex<Client>>,
-    streams: HashMap<u64, StreamHandle>,
+    pub(crate) pool: Pool,
+    pub(crate) client: Arc<Mutex<Client>>,
+    pub(crate) auth: Option<Auth>,
+    pub(crate) streams: HashMap<u64, StreamHandle>,
     tile_heights: HashMap<u64, u32>,
     visible: HashMap<u64, bool>,
-    tabs: Vec<Tab>,
-    active: usize,
+    muted: HashMap<u64, bool>,
+    pub(crate) tabs: Vec<Tab>,
+    pub(crate) active: usize,
+    pub(crate) maximized: Option<egui_tiles::TileId>,
     next_id: u64,
-    latency: Latency,
+    pub(crate) latency: Latency,
+    pub(crate) chat: ChatState,
+    pub(crate) images: Images,
+    pub(crate) login: LoginDialog,
+    login_result: Slot<Result<Auth, String>>,
+    pub(crate) add_text: String,
+    pub(crate) followed: Vec<ChannelInfo>,
+    followed_slot: Slot<Result<Vec<ChannelInfo>, String>>,
+    pub(crate) followed_loading: bool,
+    followed_at: Option<Instant>,
+    pub(crate) info: HashMap<String, ChannelInfo>,
+    info_slot: Slot<Vec<ChannelInfo>>,
+    info_at: Option<Instant>,
+    fonts_slot: Slot<egui::FontDefinitions>,
+    pub(crate) renaming: Option<usize>,
+    pub(crate) error: Option<String>,
+    saved_json: String,
+    save_check: Instant,
     needs_pass: bool,
     repaint_at: Option<Instant>,
     smoke_until: Option<Instant>,
     started: Instant,
-    error: Option<String>,
     passes: u64,
+    pass_us: u64,
     exit_code: i32,
 }
 
@@ -85,15 +97,16 @@ pub fn run(options: Options) -> i32 {
         log::error!("event loop: {e}");
         return 1;
     }
+    app.save_now();
     app.streams.clear();
     app.exit_code
 }
 
-fn grid_tree(id: &str, panes: Vec<Pane>) -> egui_tiles::Tree<Pane> {
-    if panes.is_empty() {
-        return egui_tiles::Tree::new_grid(egui::Id::unique(id), vec![Pane::Empty]);
-    }
-    egui_tiles::Tree::new_grid(egui::Id::unique(id), panes)
+fn wake_fn(proxy: &EventLoopProxy<UserEvent>) -> Arc<dyn Fn() + Send + Sync> {
+    let proxy = proxy.clone();
+    Arc::new(move || {
+        let _ = proxy.send_event(UserEvent::Wake);
+    })
 }
 
 impl App {
@@ -110,18 +123,50 @@ impl App {
                 let _ = proxy.send_event(UserEvent::LibReady);
             });
         }
-        let auth = gk_twitch::auth::store::load();
-        let client = Arc::new(Mutex::new(Client::new(Http::new(), auth)));
-        let panes: Vec<Pane> = options
-            .channels
-            .iter()
-            .map(|c| Pane::Stream(StreamPane { channel: c.clone(), quality: Quality::Auto, volume: 70.0, muted: false, id: 0 }))
-            .collect();
-        let tabs = vec![Tab { title: "Main".into(), tree: grid_tree("tab-0", panes) }];
-        let smoke_until = options.smoke.map(|s| Instant::now() + Duration::from_secs_f64(s));
+        let pool = Pool::new(4);
+        let wake = wake_fn(&proxy);
+        let fonts_slot: Slot<egui::FontDefinitions> = Arc::default();
+        {
+            let (slot, wake) = (fonts_slot.clone(), wake.clone());
+            pool.spawn(move || {
+                if let Some(defs) = crate::fonts::load() {
+                    if let Ok(mut s) = slot.lock() {
+                        *s = Some(defs);
+                    }
+                    wake();
+                }
+            });
+        }
+        let smoke = options.smoke.is_some();
+        // Smoke runs never use the viewer's account or saved layout.
+        let auth = if smoke { None } else { gk_twitch::auth::store::load() };
+        let http = Http::new();
+        let client = Arc::new(Mutex::new(Client::new(http.clone(), auth.clone())));
+        let creds = auth.as_ref().map(|a| gk_chat::Credentials { login: a.login.clone(), token: a.token.clone() });
+        let chat = ChatState::new(creds, pool.clone(), client.clone(), wake.clone());
+        let images = Images::new(pool.clone(), http, wake);
+
+        let (mut tabs, mut active, mut latency) = (Vec::new(), 0, Latency::Ultra);
+        if !options.channels.is_empty() {
+            let panes = options.channels.iter().map(|c| Pane::stream(c)).collect();
+            let mut tab = Tab::new("Main", panes);
+            if options.chat {
+                let first = options.channels[0].clone();
+                tab.apply(Preset::Grid, Some(first));
+            }
+            tabs.push(tab);
+        } else if !smoke && let Some(saved) = crate::layout::load() {
+            tabs = saved.tabs;
+            active = saved.active;
+            latency = saved.latency;
+        }
+        if tabs.is_empty() {
+            tabs.push(Tab::new("Main", vec![]));
+        }
         let ctx = egui::Context::default();
-        ctx.set_visuals(egui::Visuals::dark());
+        crate::ui::style(&ctx);
         Self {
+            smoke_until: options.smoke.map(|s| Instant::now() + Duration::from_secs_f64(s)),
             options,
             proxy,
             window: None,
@@ -129,20 +174,40 @@ impl App {
             ctx,
             presenter: None,
             lib,
+            pool,
             client,
+            auth,
             streams: HashMap::new(),
             tile_heights: HashMap::new(),
             visible: HashMap::new(),
+            muted: HashMap::new(),
             tabs,
-            active: 0,
+            active,
+            maximized: None,
             next_id: 1,
-            latency: Latency::Ultra,
+            latency,
+            chat,
+            images,
+            login: LoginDialog::default(),
+            login_result: Arc::default(),
+            add_text: String::new(),
+            followed: Vec::new(),
+            followed_slot: Arc::default(),
+            followed_loading: false,
+            followed_at: None,
+            info: HashMap::new(),
+            info_slot: Arc::default(),
+            info_at: None,
+            fonts_slot,
+            renaming: None,
+            error: None,
+            saved_json: String::new(),
+            save_check: Instant::now(),
             needs_pass: true,
             repaint_at: None,
-            smoke_until,
             started: Instant::now(),
-            error: None,
             passes: 0,
+            pass_us: 0,
             exit_code: 0,
         }
     }
@@ -151,55 +216,300 @@ impl App {
         self.lib.lock().ok()?.as_ref()?.as_ref().ok().cloned()
     }
 
-    /// Starts players for new stream panes, stops removed ones, and pauses
-    /// video decoding of streams outside the active tab.
+    pub(crate) fn wake(&self) -> Arc<dyn Fn() + Send + Sync> {
+        wake_fn(&self.proxy)
+    }
+
+    /// Starts players for new stream panes, stops removed ones, pauses video
+    /// decoding outside the active tab, and moves the sound to the focused
+    /// stream of the active tab.
     fn sync_streams(&mut self) {
         let (Some(lib), Some(presenter)) = (self.lib(), self.presenter.clone()) else { return };
-        let mut wanted: HashMap<u64, bool> = HashMap::new();
+        let mut wanted: HashMap<u64, (bool, bool)> = HashMap::new(); // id -> (visible, audible)
+        let mut chats: HashSet<String> = HashSet::new();
         for (ti, tab) in self.tabs.iter_mut().enumerate() {
+            let active = ti == self.active;
+            if tab.audio.is_none() {
+                tab.audio = tab.stream_channels().into_iter().next();
+            }
+            let audio = tab.audio.clone();
             for tile in tab.tree.tiles.tiles_mut() {
-                if let egui_tiles::Tile::Pane(Pane::Stream(p)) = tile {
-                    if p.id == 0 || !self.streams.contains_key(&p.id) {
-                        let id = self.next_id;
-                        self.next_id += 1;
-                        p.id = id;
-                        let proxy = self.proxy.clone();
-                        let env = Env {
-                            lib: lib.clone(),
-                            client: self.client.clone(),
-                            presenter: presenter.clone(),
-                            notify: Arc::new(move || {
-                                let _ = proxy.send_event(UserEvent::Wake);
-                            }),
-                            muted_by_flag: self.options.mute,
-                        };
-                        let settings = Settings { quality: p.quality.clone(), volume: p.volume, muted: p.muted, latency: self.latency };
-                        self.streams.insert(id, StreamHandle::spawn(id, p.channel.clone(), env, settings));
+                match tile {
+                    egui_tiles::Tile::Pane(Pane::Stream(p)) => {
+                        if p.id == 0 || !self.streams.contains_key(&p.id) {
+                            let id = self.next_id;
+                            self.next_id += 1;
+                            p.id = id;
+                            let env = Env {
+                                lib: lib.clone(),
+                                client: self.client.clone(),
+                                presenter: presenter.clone(),
+                                notify: wake_fn(&self.proxy),
+                                muted_by_flag: self.options.mute,
+                            };
+                            let audible = active && audio.as_deref() == Some(p.channel.as_str());
+                            let settings = Settings { quality: p.quality.clone(), volume: p.volume, muted: !audible, latency: self.latency };
+                            self.streams.insert(id, StreamHandle::spawn(id, p.channel.clone(), env, settings));
+                            self.muted.insert(id, !audible);
+                        }
+                        let e = wanted.entry(p.id).or_default();
+                        e.0 |= active;
+                        e.1 |= active && audio.as_deref() == Some(p.channel.as_str());
                     }
-                    *wanted.entry(p.id).or_default() |= ti == self.active;
+                    egui_tiles::Tile::Pane(Pane::Chat { channel }) => {
+                        chats.insert(channel.clone());
+                    }
+                    _ => {}
                 }
             }
         }
         self.streams.retain(|id, _| wanted.contains_key(id));
         self.tile_heights.retain(|id, _| wanted.contains_key(id));
-        for (id, vis) in wanted {
+        self.visible.retain(|id, _| wanted.contains_key(id));
+        self.muted.retain(|id, _| wanted.contains_key(id));
+        for (id, (vis, audible)) in wanted {
+            let Some(s) = self.streams.get(&id) else { continue };
             if self.visible.get(&id) != Some(&vis) {
                 self.visible.insert(id, vis);
-                if let Some(s) = self.streams.get(&id) {
-                    s.send(Cmd::Visible(vis));
+                s.send(Cmd::Visible(vis));
+            }
+            if self.muted.get(&id) != Some(&!audible) {
+                self.muted.insert(id, !audible);
+                s.send(Cmd::Mute(!audible));
+            }
+        }
+        self.chat.sync_channels(&chats);
+    }
+
+    pub(crate) fn set_latency(&mut self, l: Latency) {
+        self.latency = l;
+        for s in self.streams.values() {
+            s.send(Cmd::Latency(l));
+        }
+    }
+
+    pub(crate) fn add_channel(&mut self, raw: &str) {
+        let login = raw.trim().trim_start_matches("https://").trim_start_matches("www.").trim_start_matches("twitch.tv/");
+        let login = login.split(['/', '?']).next().unwrap_or_default().to_ascii_lowercase();
+        if !gk_twitch::api::valid_login(&login) {
+            return;
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.add_stream(&login);
+            if tab.audio.is_none() {
+                tab.audio = Some(login);
+            }
+        }
+        self.maximized = None;
+    }
+
+    pub(crate) fn start_login(&mut self, input: String) {
+        let Some(token) = gk_twitch::auth::parse_token_input(&input) else {
+            self.login.message = Some((false, "No Twitch login found in that. Use a cookies.txt from twitch.tv or the auth-token value.".into()));
+            return;
+        };
+        self.login.busy = true;
+        self.login.message = None;
+        let (slot, wake, http) = (self.login_result.clone(), self.wake(), self.client.lock().map(|c| c.http().clone()).unwrap_or_default());
+        self.pool.spawn(move || {
+            let r = gk_twitch::auth::validate(&http, &token).map_err(|e| e.to_string());
+            if let Ok(a) = &r
+                && let Err(e) = gk_twitch::auth::store::save(a)
+            {
+                log::warn!("could not store the login: {e}");
+            }
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(r);
+            }
+            wake();
+        });
+    }
+
+    pub(crate) fn pick_cookie_file(&mut self) {
+        self.login_from_file(None);
+    }
+
+    /// Logs in from a cookie file: `path`, or one the viewer picks. The
+    /// dialog, the read and the check all run on a worker.
+    pub(crate) fn login_from_file(&mut self, path: Option<std::path::PathBuf>) {
+        let (slot, wake) = (self.login_result.clone(), self.wake());
+        self.login.busy = true;
+        self.login.message = None;
+        let http = self.client.lock().map(|c| c.http().clone()).unwrap_or_default();
+        self.pool.spawn(move || {
+            let file = path.or_else(|| rfd::FileDialog::new().set_title("Your Twitch cookies (cookies.txt)").add_filter("Cookies", &["txt", "json"]).pick_file());
+            let r = match file {
+                None => Err(String::new()),
+                Some(path) => match std::fs::read_to_string(&path) {
+                    Err(e) => Err(format!("Could not read the file: {e}")),
+                    Ok(text) => match gk_twitch::auth::parse_token_input(&text) {
+                        None => Err("That file has no Twitch login (auth-token cookie for twitch.tv).".into()),
+                        Some(token) => gk_twitch::auth::validate(&http, &token).map_err(|e| e.to_string()).inspect(|a| {
+                            if let Err(e) = gk_twitch::auth::store::save(a) {
+                                log::warn!("could not store the login: {e}");
+                            }
+                        }),
+                    },
+                },
+            };
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(r);
+            }
+            wake();
+        });
+    }
+
+    pub(crate) fn logout(&mut self) {
+        gk_twitch::auth::store::clear();
+        self.apply_auth(None);
+        self.login.message = Some((true, "Logged out.".into()));
+    }
+
+    fn apply_auth(&mut self, auth: Option<Auth>) {
+        self.auth = auth.clone();
+        let http = self.client.lock().map(|c| c.http().clone()).unwrap_or_default();
+        if let Ok(mut c) = self.client.lock() {
+            *c = Client::new(http, auth.clone());
+        }
+        self.chat.set_credentials(auth.map(|a| gk_chat::Credentials { login: a.login, token: a.token }));
+        self.followed.clear();
+        self.followed_at = None;
+        // New playback tokens: with the account's Turbo status.
+        for s in self.streams.values() {
+            s.send(Cmd::Reload);
+        }
+    }
+
+    pub(crate) fn refresh_followed(&mut self, force: bool) {
+        if self.auth.is_none() || self.followed_loading {
+            return;
+        }
+        if !force && self.followed_at.is_some_and(|t| t.elapsed() < Duration::from_secs(90)) {
+            return;
+        }
+        self.followed_loading = true;
+        self.followed_at = Some(Instant::now());
+        let (slot, wake, client) = (self.followed_slot.clone(), self.wake(), self.client.clone());
+        self.pool.spawn(move || {
+            let r = client.lock().map(|c| c.clone()).map_err(|_| "busy".to_string()).and_then(|c| c.followed_live().map_err(|e| e.to_string()));
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(r);
+            }
+            wake();
+        });
+    }
+
+    /// Title, category and viewers for the streams in the tabs, every minute.
+    fn refresh_info(&mut self) {
+        if self.info_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        let logins: Vec<String> = self.tabs.iter().flat_map(|t| t.stream_channels()).collect::<HashSet<_>>().into_iter().collect();
+        if logins.is_empty() {
+            return;
+        }
+        self.info_at = Some(Instant::now());
+        let (slot, wake, client) = (self.info_slot.clone(), self.wake(), self.client.clone());
+        self.pool.spawn(move || {
+            let Some(c) = client.lock().map(|c| c.clone()).ok() else { return };
+            let refs: Vec<&str> = logins.iter().map(String::as_str).collect();
+            let mut all = Vec::new();
+            for chunk in refs.chunks(50) {
+                if let Ok(list) = c.channels(chunk) {
+                    all.extend(list);
                 }
             }
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(all);
+            }
+            wake();
+        });
+    }
+
+    /// Takes results from workers.
+    fn poll(&mut self) {
+        if let Some(defs) = self.fonts_slot.lock().ok().and_then(|mut s| s.take()) {
+            self.ctx.set_fonts(defs);
+            for ch in self.chat.channels.values_mut() {
+                ch.view.invalidate();
+            }
+        }
+        if let Some(r) = self.login_result.lock().ok().and_then(|mut s| s.take()) {
+            self.login.busy = false;
+            match r {
+                Ok(a) => {
+                    self.login.message = Some((true, format!("Logged in as {}.", a.login)));
+                    self.login.paste.clear();
+                    self.apply_auth(Some(a));
+                    self.refresh_followed(true);
+                }
+                Err(e) if e.is_empty() => {}
+                Err(e) => self.login.message = Some((false, e)),
+            }
+        }
+        if let Some(r) = self.followed_slot.lock().ok().and_then(|mut s| s.take()) {
+            self.followed_loading = false;
+            match r {
+                Ok(list) => self.followed = list,
+                Err(e) => log::warn!("followed channels: {e}"),
+            }
+        }
+        if let Some(list) = self.info_slot.lock().ok().and_then(|mut s| s.take()) {
+            for c in list {
+                self.info.insert(c.login.clone(), c);
+            }
+        }
+        self.chat.poll();
+        self.images.poll(&self.ctx, self.presenter.as_deref());
+    }
+
+    fn persist(&self) -> bool {
+        self.options.smoke.is_none() && self.options.channels.is_empty()
+    }
+
+    fn save_now(&mut self) {
+        if !self.persist() {
+            return;
+        }
+        if let Some(json) = crate::layout::to_json(&self.tabs, self.active, self.latency)
+            && json != self.saved_json
+        {
+            crate::layout::write(json.clone());
+            self.saved_json = json;
+        }
+    }
+
+    /// Saves the layout off the UI thread when it changed (checked every 2 s).
+    fn save_soon(&mut self) {
+        if self.save_check.elapsed() < Duration::from_secs(2) || !self.persist() {
+            return;
+        }
+        self.save_check = Instant::now();
+        if let Some(json) = crate::layout::to_json(&self.tabs, self.active, self.latency)
+            && json != self.saved_json
+        {
+            self.saved_json = json.clone();
+            self.pool.spawn(move || crate::layout::write(json));
         }
     }
 
     fn pass(&mut self) {
-        let (Some(window), Some(state)) = (self.window.clone(), self.egui_state.as_mut()) else { return };
-        let raw = state.take_egui_input(&window);
+        let Some(window) = self.window.clone() else { return };
+        let t0 = Instant::now();
+        self.poll();
+        let Some(state) = self.egui_state.as_mut() else { return };
+        let mut raw = state.take_egui_input(&window);
+        if self.smoke_until.is_some()
+            && let Some((x, y)) = self.options.pointer
+        {
+            raw.events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
+        }
         let mut videos: Vec<VideoTile> = Vec::new();
         let mut heights: Vec<(u64, u32)> = Vec::new();
+        self.images.frame += 1;
         let ctx = self.ctx.clone();
         let full = ctx.run_ui(raw, |ui| {
-            self.ui(ui, &mut videos, &mut heights);
+            crate::ui::draw(self, ui, &mut videos, &mut heights);
         });
         self.passes += 1;
         if let Some(state) = self.egui_state.as_mut() {
@@ -230,21 +540,9 @@ impl App {
             }
         }
         self.sync_streams();
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, heights: &mut Vec<(u64, u32)>) {
-        let ctx = ui.ctx().clone();
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(10, 10, 12))).show(ui, |ui| {
-            if let Some(e) = &self.error {
-                ui.centered_and_justified(|ui| ui.label(egui::RichText::new(e).color(egui::Color32::LIGHT_RED)));
-                return;
-            }
-            let ppp = ctx.pixels_per_point();
-            let mut behavior = TileBehavior { streams: &self.streams, videos, heights, ppp };
-            if let Some(tab) = self.tabs.get_mut(self.active) {
-                tab.tree.ui(&mut behavior, ui);
-            }
-        });
+        self.refresh_info();
+        self.save_soon();
+        self.pass_us += t0.elapsed().as_micros() as u64;
     }
 
     fn finish_smoke(&mut self, event_loop: &ActiveEventLoop) {
@@ -263,9 +561,10 @@ impl App {
         let secs = self.started.elapsed().as_secs_f64();
         let ld = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
         println!(
-            "smoke: secs={secs:.1} presents={} ui_passes={} ui_frames={} video_frames={} anim_redraws={} render_busy_ms={} slow_waits={}",
+            "smoke: secs={secs:.1} presents={} ui_passes={} ui_pass_ms_total={} ui_frames={} video_frames={} anim_redraws={} render_busy_ms={} slow_waits={}",
             ld(&st.presents),
             self.passes,
+            self.pass_us / 1000,
             ld(&st.ui_frames),
             ld(&st.video_frames),
             ld(&st.anim_redraws),
@@ -292,85 +591,10 @@ impl App {
                 st.in_ad
             );
         }
+        for (name, ch) in &self.chat.channels {
+            println!("chat {name}: lines={} room_id={} emotes={}", ch.buffer.len(), ch.room_id, ch.emotes.len());
+        }
         event_loop.exit();
-    }
-}
-
-struct TileBehavior<'a> {
-    streams: &'a HashMap<u64, StreamHandle>,
-    videos: &'a mut Vec<VideoTile>,
-    heights: &'a mut Vec<(u64, u32)>,
-    ppp: f32,
-}
-
-impl egui_tiles::Behavior<Pane> for TileBehavior<'_> {
-    fn pane_ui(&mut self, ui: &mut egui::Ui, _tile: egui_tiles::TileId, pane: &mut Pane) -> egui_tiles::UiResponse {
-        let rect = ui.max_rect();
-        match pane {
-            Pane::Stream(p) => {
-                // Align to whole pixels: the stream texture is exactly this
-                // size, so it maps 1:1 to the screen.
-                let px = [
-                    (rect.min.x * self.ppp).round() as i32,
-                    (rect.min.y * self.ppp).round() as i32,
-                    (rect.max.x * self.ppp).round() as i32,
-                    (rect.max.y * self.ppp).round() as i32,
-                ];
-                let aligned = egui::Rect::from_min_max(
-                    egui::pos2(px[0] as f32 / self.ppp, px[1] as f32 / self.ppp),
-                    egui::pos2(px[2] as f32 / self.ppp, px[3] as f32 / self.ppp),
-                );
-                let status = self.streams.get(&p.id).map(|s| s.status()).unwrap_or_default();
-                if p.id != 0 && px[2] > px[0] && px[3] > px[1] {
-                    ui.painter().rect_filled(aligned, 0.0, egui::Color32::BLACK);
-                    ui.painter().image(
-                        egui::TextureId::User(p.id),
-                        aligned,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                    self.videos.push(VideoTile { id: p.id, rect_px: px });
-                    self.heights.push((p.id, (px[3] - px[1]).max(1) as u32));
-                }
-                let msg = match &status.state {
-                    _ if status.in_ad => Some(format!("{}: ad break, skipping it (log in with Turbo for none)", p.channel)),
-                    State::Starting => Some(format!("{} · connecting…", p.channel)),
-                    State::Offline => Some(format!("{} is offline", p.channel)),
-                    State::Error(e) => Some(format!("{}: {e}", p.channel)),
-                    State::Playing => None,
-                };
-                if let Some(m) = msg {
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, m, egui::FontId::proportional(16.0), egui::Color32::from_gray(200));
-                }
-                let label = format!("{}  {}  {:.1}s", p.channel, status.current, status.buffer_tenths as f64 / 10.0);
-                ui.painter().text(rect.min + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(13.0), egui::Color32::from_white_alpha(200));
-                egui_tiles::UiResponse::None
-            }
-            Pane::Chat { channel } => {
-                ui.label(format!("chat: {channel}"));
-                egui_tiles::UiResponse::None
-            }
-            Pane::Empty => {
-                ui.centered_and_justified(|ui| ui.label("Empty"));
-                egui_tiles::UiResponse::None
-            }
-        }
-    }
-
-    fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
-        match pane {
-            Pane::Stream(p) => p.channel.clone().into(),
-            Pane::Chat { channel } => format!("chat · {channel}").into(),
-            Pane::Empty => "empty".into(),
-        }
-    }
-
-    fn gap_width(&self, _style: &egui::Style) -> f32 {
-        2.0
-    }
-
-    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
-        egui_tiles::SimplificationOptions { all_panes_must_have_tabs: false, ..Default::default() }
     }
 }
 
@@ -381,9 +605,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         use winit::platform::windows::WindowAttributesExtWindows;
         let (w, h) = self.options.size.unwrap_or((1600, 900));
-        let mut attrs = Window::default_attributes()
-            .with_title("Glotzkiste")
-            .with_min_inner_size(LogicalSize::new(480.0, 270.0));
+        let mut attrs = Window::default_attributes().with_title("Glotzkiste").with_min_inner_size(LogicalSize::new(480.0, 270.0));
         attrs = if self.smoke_until.is_some() {
             // Agent runs never show on the owner's screen (AGENTS.md).
             attrs
@@ -416,18 +638,12 @@ impl ApplicationHandler<UserEvent> for App {
         match Presenter::start(hwnd, (size.width, size.height)) {
             Ok((p, info)) => {
                 log::info!("adapter: {} software={}", info.adapter, info.software);
+                p.set_clear_color(crate::ui::BG_LINEAR);
                 self.presenter = Some(Arc::new(p));
             }
             Err(e) => self.error = Some(format!("Video output failed: {e}")),
         }
-        let state = egui_winit::State::new(
-            self.ctx.clone(),
-            egui::ViewportId::ROOT,
-            &window,
-            Some(window.scale_factor() as f32),
-            None,
-            Some(8192),
-        );
+        let state = egui_winit::State::new(self.ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(8192));
         self.egui_state = Some(state);
         self.window = Some(window);
         self.needs_pass = true;
@@ -440,7 +656,6 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(Some(Err(e))) = self.lib.lock().ok().map(|s| s.clone()) {
                     self.error = Some(format!("The video library could not be loaded: {e}"));
                 }
-                self.sync_streams();
                 self.needs_pass = true;
             }
         }
@@ -461,10 +676,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.needs_pass = true;
             }
-            WindowEvent::RedrawRequested => {
-                self.needs_pass = false;
-                self.pass();
-            }
+            WindowEvent::RedrawRequested => self.needs_pass = true,
             _ => {}
         }
     }

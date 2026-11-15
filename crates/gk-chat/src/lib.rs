@@ -69,6 +69,15 @@ impl ChatBuffer {
         }
     }
 
+    /// Re-tokenizes every line (an emote set arrived after the messages).
+    pub fn retokenize(&mut self, mut f: impl FnMut(&ChatMessage) -> Vec<Span>) {
+        for l in self.lines.iter_mut() {
+            l.spans = f(&l.msg);
+            l.mention = tokenize::mentions(&l.spans);
+        }
+        self.revision += 1;
+    }
+
     pub fn len(&self) -> usize {
         self.lines.len()
     }

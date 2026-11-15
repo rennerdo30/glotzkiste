@@ -112,6 +112,7 @@ pub struct Settings {
 }
 
 pub struct StreamHandle {
+    #[allow(dead_code)]
     pub id: u64,
     pub channel: String,
     tx: Sender<Cmd>,

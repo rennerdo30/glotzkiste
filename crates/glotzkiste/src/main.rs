@@ -2,18 +2,34 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod chat_state;
+mod fonts;
+mod images;
+mod layout;
 mod libmpv;
 mod logger;
 mod stream;
+mod ui;
+mod workers;
+
+/// A random number from the OS-seeded hasher (ids that must not repeat).
+pub fn random_u64() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    h.finish()
+}
 
 const HELP: &str = "Glotzkiste: a multi-stream live viewer.
 
 Usage: glotzkiste [options] [CHANNEL...]
 
   --mute            Start every stream muted
+  --chat            With channels: open the first channel's chat too
   --smoke SECS      Run offscreen for SECS seconds, print measurements, exit
   --snapshot FILE   With --smoke: save a PNG of the window at the end
   --size WxH        Window size in pixels (default 1600x900)
+  --pointer X,Y     With --smoke: a virtual mouse at X,Y (points), for snapshots
   --help            This text
 ";
 
@@ -21,9 +37,11 @@ Usage: glotzkiste [options] [CHANNEL...]
 pub struct Options {
     pub channels: Vec<String>,
     pub mute: bool,
+    pub chat: bool,
     pub smoke: Option<f64>,
     pub snapshot: Option<std::path::PathBuf>,
     pub size: Option<(u32, u32)>,
+    pub pointer: Option<(f32, f32)>,
 }
 
 fn parse(args: &[String]) -> Result<Option<Options>, String> {
@@ -33,10 +51,16 @@ fn parse(args: &[String]) -> Result<Option<Options>, String> {
         match a.as_str() {
             "--help" | "-h" => return Ok(None),
             "--mute" => o.mute = true,
+            "--chat" => o.chat = true,
             "--smoke" => {
                 o.smoke = Some(
                     it.next().and_then(|s| s.parse::<f64>().ok()).filter(|s| *s > 0.0 && *s <= 600.0).ok_or("--smoke needs seconds (up to 600)")?,
                 )
+            }
+            "--pointer" => {
+                let s = it.next().ok_or("--pointer needs X,Y")?;
+                let (x, y) = s.split_once(',').ok_or("--pointer needs X,Y")?;
+                o.pointer = Some((x.parse().map_err(|_| "bad x")?, y.parse().map_err(|_| "bad y")?));
             }
             "--snapshot" => o.snapshot = Some(it.next().ok_or("--snapshot needs a file")?.into()),
             "--size" => {
