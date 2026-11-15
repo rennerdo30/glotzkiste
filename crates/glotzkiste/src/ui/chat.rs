@@ -74,6 +74,13 @@ fn name_color(login: &str, color: Option<[u8; 3]>) -> Color32 {
     }
 }
 
+/// Drops invisible format characters (tag characters some clients append to
+/// dodge duplicate filters, zero-width marks, BOMs), which fonts draw as
+/// boxes.
+fn visible(s: &str) -> String {
+    s.chars().filter(|c| !matches!(c, '\u{E0000}'..='\u{E007F}' | '\u{200B}' | '\u{200C}' | '\u{200E}' | '\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}' | '\u{034F}' | '\u{180E}' | '\u{00AD}')).collect()
+}
+
 struct Flow<'a> {
     width: f32,
     x: f32,
@@ -118,13 +125,17 @@ impl Flow<'_> {
             while end < s.len() && b[end] == b' ' {
                 end += 1;
             }
-            let piece = s[start..end].to_owned();
+            let piece = visible(&s[start..end]);
+            if piece.is_empty() {
+                start = end;
+                continue;
+            }
             let galley = self.ctx.fonts_mut(|f| f.layout_no_wrap(piece, font.clone(), color));
             if galley.size().x > self.width {
                 if self.x > 0.0 {
                     self.break_row();
                 }
-                let wrapped = self.ctx.fonts_mut(|f| f.layout(s[start..end].to_owned(), font.clone(), color, self.width));
+                let wrapped = self.ctx.fonts_mut(|f| f.layout(visible(&s[start..end]), font.clone(), color, self.width));
                 let sz = wrapped.size();
                 self.place(sz.x, sz.y, |x| Item::Text { pos: vec2(x, 0.0), galley: wrapped, link: link.clone() });
                 self.break_row();
