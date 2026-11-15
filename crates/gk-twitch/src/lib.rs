@@ -10,6 +10,7 @@ pub mod auth;
 pub mod emotes;
 pub mod http;
 pub mod image;
+pub mod live;
 pub mod playlist;
 
 pub use api::{Badge, ChannelInfo, Client, Playback};
