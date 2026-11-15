@@ -1,0 +1,30 @@
+libmpv in Glotzkiste
+
+Glotzkiste uses libmpv, loaded at runtime as a separate library. It is not
+part of Glotzkiste's own code. To keep Glotzkiste a single file, a compressed
+copy of libmpv-2.dll is stored inside glotzkiste.exe and written to
+%LOCALAPPDATA%\Glotzkiste\libmpv-<hash>.dll on first start, then loaded from
+there.
+
+Replacing it
+  Put any compatible libmpv-2.dll (client API 2.x with the Direct3D 11 render
+  API, x86-64) next to glotzkiste.exe. Glotzkiste then loads that file instead
+  of its own copy.
+
+What it is
+  mpv, commit fe753a7824 (2026-11-13), built as libmpv with its LGPL
+  configuration (x86-64-v3, needs AVX2). The DLL contains FFmpeg and other
+  libraries built in the same LGPL configuration.
+
+Licence
+  GNU Lesser General Public License, version 2.1 or later. The full text is
+  in LGPL-2.1.txt next to this file.
+
+Source code
+  mpv:              https://github.com/mpv-player/mpv/tree/fe753a7824
+  The build:        https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-11-13-fe753a7824
+  Build scripts and patches for the exact configuration, including FFmpeg and
+  every bundled library and its version, are in that repository at that tag.
+  If those links stop working, ask for the source at
+  https://github.com/rennerdo30/glotzkiste/issues and it will be provided for
+  at least three years after this release.

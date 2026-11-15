@@ -64,7 +64,7 @@ libmpv loaded at runtime, `Mpv` client handle, `RenderContext::new_d3d11`, `rend
 
 1. **M1 Foundations (in order, no parallel jobs):** `gk-twitch` playback, then `gk-render` + app skeleton playing N channels from the command line in a 2×2 tile layout, then `gk-chat`.
 2. **M2 The viewer:** tabs, tile editor and presets, chat pane with emotes and badges, login, quality and audio focus, persistence.
-3. **M3 Polish and proof:** smoke numbers for 1, 4 and 4 + 2 chats; review; release build for the friend.
+3. **M3 Polish and proof:** smoke numbers for 1, 4 and 4 + 2 chats; review; release build.
 
 ## 4. Decisions made while building (2026-11-15)
 

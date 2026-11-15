@@ -42,7 +42,18 @@ fn extract() -> Result<Option<PathBuf>, String> {
     Ok(Some(path))
 }
 
+/// A libmpv-2.dll next to the executable replaces the embedded copy (the
+/// LGPL lets the viewer swap the library; licenses/libmpv-NOTICE.txt).
+fn replacement() -> Option<PathBuf> {
+    let p = std::env::current_exe().ok()?.parent()?.join("libmpv-2.dll");
+    p.is_file().then_some(p)
+}
+
 pub fn load() -> Result<Arc<Libmpv>, String> {
+    if let Some(p) = replacement() {
+        log::info!("using the libmpv next to the executable: {}", p.display());
+        return Libmpv::load_from(&[p]).map(Arc::new).map_err(|e| e.to_string());
+    }
     match extract()? {
         Some(path) => Libmpv::load_from(&[path]).map(Arc::new).map_err(|e| e.to_string()),
         None => Libmpv::load().map(Arc::new).map_err(|e| e.to_string()),
