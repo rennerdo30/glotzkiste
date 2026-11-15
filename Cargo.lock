@@ -222,6 +222,11 @@ dependencies = [
 [[package]]
 name = "glotzkiste"
 version = "0.1.0"
+dependencies = [
+ "gk-mpv",
+ "gk-twitch",
+ "serde_json",
+]
 
 [[package]]
 name = "hashbrown"

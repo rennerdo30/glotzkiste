@@ -277,7 +277,9 @@ impl LiveFeed {
         Self { shared, threads }
     }
 
+    /// A reader for a (re)opened player stream; clears an earlier cancel.
     pub fn reader(&self) -> FeedReader {
+        lock(&self.shared.pipe).cancelled = false;
         FeedReader { shared: self.shared.clone() }
     }
 
@@ -391,6 +393,9 @@ fn playlist_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
     let mut next_seq: Option<u64> = None;
     let mut next_pdt: Option<f64> = None;
     let mut failures = 0u32;
+    // Nothing queued yet (only ads so far): the first content starts at the
+    // live edge, not after the ad break.
+    let mut queued_any = false;
     while !shared.stop.load(Ordering::Relaxed) {
         let (url, gen_now, want) = {
             let c = lock(&shared.control);
@@ -431,7 +436,7 @@ fn playlist_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
             }
             q.retain(|(g, _)| *g == gen_now);
         }
-        let start_index = match (next_seq, next_pdt) {
+        let start_index = match (next_seq.filter(|_| queued_any), next_pdt) {
             (None, _) => {
                 // First load: start at the first prefetch segment (being
                 // encoded right now), otherwise two segments from the end.
@@ -453,7 +458,7 @@ fn playlist_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
         {
             let mut q = lock(&shared.queue);
             for s in pl.segments.iter().skip(start_index) {
-                if next_seq.is_some_and(|n| s.seq < n) && !switched {
+                if queued_any && next_seq.is_some_and(|n| s.seq < n) && !switched {
                     continue;
                 }
                 next_seq = Some(s.seq + 1);
@@ -465,6 +470,7 @@ fn playlist_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
                 }
                 q.push_back((gen_now, s.clone()));
                 added = true;
+                queued_any = true;
             }
             // Never hold more than ~30 segments: a stalled player jumps ahead.
             while q.len() > 30 {

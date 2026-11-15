@@ -87,6 +87,8 @@ pub(crate) struct Inner {
     pub(crate) lib: Arc<Libmpv>,
     pub(crate) handle: *mut ffi::Handle,
     wakeup: Mutex<Option<Box<Callback>>>,
+    // Open handlers of registered stream protocols; alive as long as the handle.
+    protocols: Mutex<Vec<Box<crate::stream::OpenFn>>>,
 }
 
 // SAFETY: libmpv's client API is thread-safe for one handle (client.h,
@@ -149,6 +151,21 @@ unsafe extern "C" fn wakeup_trampoline(data: *mut c_void) {
 }
 
 impl Mpv {
+    /// Registers `protocol://...` URLs served by `open` (mpv's stream
+    /// callback API): mpv reads them through [`crate::StreamReader`] on its
+    /// demuxer thread. Call before loading such a URL.
+    pub fn add_stream_protocol(&self, protocol: &str, open: crate::stream::OpenFn) -> Result<(), Error> {
+        let boxed: Box<crate::stream::OpenFn> = Box::new(open);
+        let data = (&*boxed as *const crate::stream::OpenFn).cast_mut().cast::<c_void>();
+        let p = cstring(protocol);
+        // SAFETY: valid handle; `data` points at the boxed handler, which is
+        // stored in `Inner` below and lives as long as the handle.
+        let code = unsafe { (self.api().stream_cb_add_ro)(self.inner.handle, p.as_ptr(), data, crate::stream::open_trampoline) };
+        check(&self.inner.lib, code)?;
+        self.inner.protocols.lock().unwrap_or_else(|p| p.into_inner()).push(boxed);
+        Ok(())
+    }
+
     /// Creates an uninitialised player. Set options, then call `initialize`.
     pub fn create(lib: Arc<Libmpv>) -> Result<Self, Error> {
         // SAFETY: plain constructor.
@@ -156,7 +173,7 @@ impl Mpv {
         if handle.is_null() {
             return Err(Error { code: -1, message: "mpv_create failed".to_owned() });
         }
-        Ok(Self { inner: Arc::new(Inner { lib, handle, wakeup: Mutex::new(None) }) })
+        Ok(Self { inner: Arc::new(Inner { lib, handle, wakeup: Mutex::new(None), protocols: Mutex::new(Vec::new()) }) })
     }
 
     fn api(&self) -> &ffi::Api {

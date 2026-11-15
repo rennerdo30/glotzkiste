@@ -80,6 +80,26 @@ pub struct D3d11Fbo {
 
 pub type WakeupFn = unsafe extern "C" fn(*mut c_void);
 
+// stream_cb.h
+pub type StreamReadFn = unsafe extern "C" fn(*mut c_void, *mut c_char, u64) -> i64;
+pub type StreamSeekFn = unsafe extern "C" fn(*mut c_void, i64) -> i64;
+pub type StreamSizeFn = unsafe extern "C" fn(*mut c_void) -> i64;
+pub type StreamCloseFn = unsafe extern "C" fn(*mut c_void);
+pub type StreamCancelFn = unsafe extern "C" fn(*mut c_void);
+
+#[repr(C)]
+pub struct StreamCbInfo {
+    pub cookie: *mut c_void,
+    pub read_fn: Option<StreamReadFn>,
+    pub seek_fn: Option<StreamSeekFn>,
+    pub size_fn: Option<StreamSizeFn>,
+    pub close_fn: Option<StreamCloseFn>,
+    pub cancel_fn: Option<StreamCancelFn>,
+}
+
+pub type StreamOpenFn = unsafe extern "C" fn(*mut c_void, *mut c_char, *mut StreamCbInfo) -> c_int;
+pub const ERROR_LOADING_FAILED: c_int = -13;
+
 /// Function pointers resolved from the loaded library. Valid while the
 /// `libloading::Library` they came from is alive (`Libmpv` keeps both).
 #[derive(Clone, Copy)]
@@ -101,6 +121,7 @@ pub struct Api {
     pub render_context_render: unsafe extern "C" fn(*mut RenderContext, *mut RenderParam) -> c_int,
     pub render_context_report_swap: unsafe extern "C" fn(*mut RenderContext),
     pub render_context_free: unsafe extern "C" fn(*mut RenderContext),
+    pub stream_cb_add_ro: unsafe extern "C" fn(*mut Handle, *const c_char, *mut c_void, StreamOpenFn) -> c_int,
 }
 
 impl Api {
@@ -138,6 +159,7 @@ impl Api {
             render_context_render: sym!("mpv_render_context_render"),
             render_context_report_swap: sym!("mpv_render_context_report_swap"),
             render_context_free: sym!("mpv_render_context_free"),
+            stream_cb_add_ro: sym!("mpv_stream_cb_add_ro"),
         })
     }
 }

@@ -89,9 +89,11 @@ impl std::error::Error for LoadError {}
 mod client;
 mod ffi;
 mod render;
+mod stream;
 
 pub use client::{EndReason, Error, Event, Format, Mpv, Value};
 pub use render::RenderContext;
+pub use stream::{OpenFn, StreamReader};
 
 /// A loaded libmpv.
 pub struct Libmpv {
