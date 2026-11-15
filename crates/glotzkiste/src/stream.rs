@@ -51,7 +51,30 @@ impl Latency {
     }
 }
 
+/// Where a stream's video is decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecodeOn {
+    /// The GPU that draws the window, zero-copy (normal).
+    #[default]
+    Gpu,
+    /// A second, NVIDIA GPU (copied back; mpv can target only NVIDIA cards).
+    Nvidia,
+    /// The CPU (when the GPU's decoder is full).
+    Cpu,
+}
+
+impl DecodeOn {
+    fn hwdec(self) -> &'static str {
+        match self {
+            DecodeOn::Gpu => "d3d11va",
+            DecodeOn::Nvidia => "nvdec-copy",
+            DecodeOn::Cpu => "no",
+        }
+    }
+}
+
 pub enum Cmd {
+    Decoder(DecodeOn),
     Quality(Quality),
     TileHeight(u32),
     Volume(f64),
@@ -90,6 +113,8 @@ pub struct Status {
     pub low_latency: bool,
     pub hwdec: String,
     pub video_height: i64,
+    /// Moved off the main GPU's decoder because it was full.
+    pub offloaded: Option<DecodeOn>,
 }
 
 /// True while the stats window is open: stream threads then sample mpv
@@ -307,6 +332,8 @@ impl Control {
             }
         }
         mpv.initialize().map_err(|e| e.to_string())?;
+        // mpv's own warnings go to our log (glotzkiste.log).
+        let _ = mpv.request_log_messages("warn");
         for (id, name, fmt) in [
             (P_CACHE, "demuxer-cache-duration", Format::Double),
             (P_DROPS, "frame-drop-count", Format::Int64),
@@ -404,6 +431,11 @@ impl Control {
             }
             Cmd::Visible(v) => {
                 let _ = mpv.command(&["set", "vid", if v { "auto" } else { "no" }]);
+            }
+            Cmd::Decoder(d) => {
+                // mpv re-creates the decoder at the next frame.
+                let _ = mpv.command(&["set", "hwdec", d.hwdec()]);
+                self.set(|s| s.offloaded = (d != DecodeOn::Gpu).then_some(d));
             }
             Cmd::Latency(l) => self.settings.latency = l,
             Cmd::Quality(q) => self.settings.quality = q,
@@ -541,6 +573,7 @@ impl Control {
                         ended = true
                     }
                     Event::Shutdown => return Ok(Next::Stop),
+                    Event::Log { prefix, level, text } => log::warn!("stream {} mpv[{prefix}] {level}: {}", self.channel, text.trim_end()),
                     _ => {}
                 }
             }

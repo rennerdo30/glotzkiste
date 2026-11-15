@@ -5,6 +5,7 @@ mod app;
 mod browsers;
 mod chat_state;
 mod fonts;
+mod gpu;
 mod images;
 mod layout;
 mod libmpv;

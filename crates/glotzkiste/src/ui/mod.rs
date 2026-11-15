@@ -82,21 +82,6 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, heigh
         // Numbers refresh twice a second while shown; closed, nothing ticks.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
     }
-    if app.stats_open {
-        let ids: Vec<u64> = app.streams.keys().copied().collect();
-        let c = stats::Ctx {
-            rects: &app.tile_rects,
-            content: app.content_rect,
-            statuses: ids.iter().filter_map(|id| Some((*id, app.streams.get(id)?.status()))).collect(),
-            stats: ids.iter().filter_map(|id| Some((*id, app.streams.get(id)?.stats()))).collect(),
-            chat_lines: app.chat.channels.iter().map(|(k, v)| (k.clone(), v.buffer.len())).collect(),
-            rates: &app.sampler.rates,
-            adapter: &app.adapter,
-            open: &mut app.stats_open,
-            on_tiles: &mut app.stats_on_tiles,
-        };
-        stats::window(ui.ctx(), c);
-    }
 }
 
 fn shortcuts(app: &mut App, ui: &egui::Ui) {

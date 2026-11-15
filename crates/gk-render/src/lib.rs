@@ -80,6 +80,8 @@ pub struct TileStats {
 pub struct DeviceInfo {
     pub adapter: String,
     pub software: bool,
+    /// The adapter's LUID (low, high): matches GPU performance counters.
+    pub luid: (u32, i32),
 }
 
 #[cfg(windows)]

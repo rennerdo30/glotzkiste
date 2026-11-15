@@ -60,6 +60,24 @@ pub struct LoginDialog {
     pub imported_file: Option<std::path::PathBuf>,
 }
 
+/// The stats in their own OS window (UI only: its own swap chain, no video).
+struct StatsWindow {
+    window: Arc<Window>,
+    state: egui_winit::State,
+    ctx: egui::Context,
+    presenter: Presenter,
+    needs_pass: bool,
+    last_pass: Instant,
+}
+
+/// Moves streams off a full GPU video decoder.
+struct Valve {
+    hot: u32,
+    drops: i64,
+    last_move: Option<Instant>,
+    checked: Instant,
+}
+
 pub struct App {
     pub(crate) options: Options,
     proxy: EventLoopProxy<UserEvent>,
@@ -109,6 +127,12 @@ pub struct App {
     pub(crate) tile_rects: Vec<crate::ui::stats::TileRect>,
     pub(crate) content_rect: egui::Rect,
     pub(crate) adapter: String,
+    render_luid: (u32, i32),
+    gpus: crate::gpu::Shared,
+    stats_win: Option<StatsWindow>,
+    stats_ui: crate::ui::stats::Ui,
+    font_defs: Option<egui::FontDefinitions>,
+    valve: Valve,
     pub(crate) error: Option<String>,
     saved_json: String,
     save_check: Instant,
@@ -299,6 +323,12 @@ impl App {
             tile_rects: Vec::new(),
             content_rect: egui::Rect::NOTHING,
             adapter: String::new(),
+            render_luid: (0, 0),
+            gpus: crate::gpu::start(),
+            stats_win: None,
+            stats_ui: Default::default(),
+            font_defs: None,
+            valve: Valve { hot: 0, drops: 0, last_move: None, checked: Instant::now() },
             error: None,
             saved_json: String::new(),
             save_check: Instant::now(),
@@ -437,6 +467,133 @@ impl App {
             }
             wake();
         });
+    }
+
+    /// Opens or closes the stats window to match `stats_open`.
+    fn sync_stats_window(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.stats_open {
+            self.stats_win = None;
+            return;
+        }
+        if self.stats_win.is_some() {
+            return;
+        }
+        use winit::platform::windows::WindowAttributesExtWindows;
+        let mut attrs = Window::default_attributes().with_title("Glotzkiste stats").with_min_inner_size(LogicalSize::new(560.0, 320.0));
+        {
+            use winit::platform::windows::IconExtWindows;
+            let small = winit::window::Icon::from_resource(1, Some(PhysicalSize::new(32, 32))).ok();
+            let big = winit::window::Icon::from_resource(1, Some(PhysicalSize::new(256, 256))).ok();
+            attrs = attrs.with_window_icon(small).with_taskbar_icon(big);
+        }
+        attrs = if self.smoke_until.is_some() {
+            attrs.with_inner_size(PhysicalSize::new(1400, 800)).with_position(PhysicalPosition::new(-20000, -21000)).with_skip_taskbar(true).with_active(false)
+        } else {
+            attrs.with_inner_size(LogicalSize::new(1100.0, 700.0))
+        };
+        let Ok(window) = event_loop.create_window(attrs).map(Arc::new) else {
+            log::error!("cannot open the stats window");
+            self.stats_open = false;
+            return;
+        };
+        let Ok(RawWindowHandle::Win32(h)) = window.window_handle().map(|h| h.as_raw()) else {
+            self.stats_open = false;
+            return;
+        };
+        let size = window.inner_size();
+        let presenter = match Presenter::start(h.hwnd.get(), (size.width, size.height)) {
+            Ok((p, _)) => p,
+            Err(e) => {
+                log::error!("stats window: {e}");
+                self.stats_open = false;
+                return;
+            }
+        };
+        presenter.set_clear_color(crate::ui::BG_LINEAR);
+        let ctx = egui::Context::default();
+        crate::ui::style(&ctx);
+        if let Some(defs) = &self.font_defs {
+            ctx.set_fonts(defs.clone());
+        }
+        let state = egui_winit::State::new(ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(8192));
+        self.stats_win = Some(StatsWindow { window, state, ctx, presenter, needs_pass: true, last_pass: Instant::now() - Duration::from_secs(1) });
+    }
+
+    /// One pass of the stats window (twice a second, and on input).
+    fn stats_pass(&mut self) {
+        let Some(w) = self.stats_win.as_mut() else { return };
+        w.needs_pass = false;
+        w.last_pass = Instant::now();
+        if let Some(p) = &self.presenter {
+            self.sampler.sample(&p.stats(), self.passes, self.pass_us);
+        }
+        let raw = w.state.take_egui_input(&w.window);
+        let ids: Vec<u64> = self.streams.keys().copied().collect();
+        let gpus = self.gpus.lock().map(|g| g.clone()).unwrap_or_default();
+        let c = crate::ui::stats::Ctx {
+            rects: &self.tile_rects,
+            statuses: ids.iter().filter_map(|id| Some((*id, self.streams.get(id)?.status()))).collect(),
+            stats: ids.iter().filter_map(|id| Some((*id, self.streams.get(id)?.stats()))).collect(),
+            chat_lines: self.chat.channels.iter().map(|(k, v)| (k.clone(), v.buffer.len())).collect(),
+            rates: &self.sampler.rates,
+            adapter: &self.adapter,
+            gpus: &gpus,
+            render_luid: self.render_luid,
+            on_tiles: &mut self.stats_on_tiles,
+            state: &mut self.stats_ui,
+        };
+        let mut c = Some(c);
+        let full = w.ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(crate::ui::BG).inner_margin(10)).show(ui, |ui| {
+                if let Some(c) = c.take() {
+                    crate::ui::stats::contents(ui, c);
+                }
+            });
+        });
+        w.state.handle_platform_output(&w.window, full.platform_output);
+        let ppp = full.pixels_per_point;
+        let primitives = w.ctx.tessellate(full.shapes, ppp);
+        w.presenter.submit(UiFrame { primitives, textures_delta: full.textures_delta, pixels_per_point: ppp, videos: Vec::new() });
+        if full.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay.is_zero()) {
+            w.needs_pass = true;
+        }
+        // The main window shows the numbers on the tiles.
+        if self.stats_on_tiles {
+            self.needs_pass = true;
+        }
+    }
+
+    /// When the GPU's video decoder stays full and frames drop, the newest
+    /// stream on it moves to a second NVIDIA GPU, else to the CPU.
+    fn run_valve(&mut self) {
+        if self.valve.checked.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.valve.checked = Instant::now();
+        let gpus = self.gpus.lock().map(|g| g.clone()).unwrap_or_default();
+        let Some(mine) = gpus.iter().find(|g| g.luid == self.render_luid) else { return };
+        self.valve.hot = if mine.decode_pct >= 90.0 { self.valve.hot + 1 } else { 0 };
+        let on_gpu: Vec<(u64, crate::stream::Status)> = self
+            .streams
+            .iter()
+            .filter(|(id, _)| self.visible.get(id) == Some(&true))
+            .map(|(id, s)| (*id, s.status()))
+            .filter(|(_, st)| st.offloaded.is_none() && matches!(st.state, crate::stream::State::Playing))
+            .collect();
+        let drops: i64 = on_gpu.iter().map(|(_, st)| st.drops).sum();
+        let dropping = drops > self.valve.drops;
+        self.valve.drops = drops;
+        if self.valve.hot < 3 || !dropping || self.valve.last_move.is_some_and(|t| t.elapsed() < Duration::from_secs(10)) {
+            return;
+        }
+        let Some((id, _)) = on_gpu.iter().max_by_key(|(id, _)| *id) else { return };
+        let target = if gpus.iter().any(|g| g.is_nvidia() && g.luid != self.render_luid) { crate::stream::DecodeOn::Nvidia } else { crate::stream::DecodeOn::Cpu };
+        log::warn!("video decoder at {:.0} % with dropped frames: stream {id} moves to {target:?}", mine.decode_pct);
+        if let Some(s) = self.streams.get(id) {
+            s.send(Cmd::Decoder(target));
+        }
+        self.valve.last_move = Some(Instant::now());
+        self.valve.hot = 0;
     }
 
     /// Looks for a newer release (daily on start, or `force` from About).
@@ -611,6 +768,10 @@ impl App {
     /// Takes results from workers.
     fn poll(&mut self) {
         if let Some(defs) = self.fonts_slot.lock().ok().and_then(|mut s| s.take()) {
+            if let Some(w) = &self.stats_win {
+                w.ctx.set_fonts(defs.clone());
+            }
+            self.font_defs = Some(defs.clone());
             self.ctx.set_fonts(defs);
             self.chat.generation += 1;
         }
@@ -811,6 +972,15 @@ impl App {
         };
         if let Some(path) = self.options.snapshot.clone() {
             self.pass();
+            if self.stats_win.is_some() {
+                self.stats_pass();
+                if let Some(w) = &self.stats_win {
+                    let stats_path = path.with_file_name(format!("{}-stats.png", path.file_stem().and_then(|s| s.to_str()).unwrap_or("snapshot")));
+                    if let Err(e) = w.presenter.snapshot(stats_path) {
+                        log::error!("stats snapshot: {e}");
+                    }
+                }
+            }
             if let Err(e) = presenter.snapshot(path) {
                 log::error!("snapshot: {e}");
             }
@@ -864,6 +1034,9 @@ impl App {
             );
         }
         println!("{}", self.describe_state());
+        for g in self.gpus.lock().map(|g| g.clone()).unwrap_or_default() {
+            println!("gpu: {} decode={:.2}% render={} nvidia={}", g.name, g.decode_pct, g.luid == self.render_luid, g.is_nvidia());
+        }
         for (name, ch) in &self.chat.channels {
             println!("chat {name}: lines={} room_id={} emotes={}", ch.buffer.len(), ch.room_id, ch.emotes.len());
         }
@@ -933,6 +1106,7 @@ impl ApplicationHandler<UserEvent> for App {
             Ok((p, info)) => {
                 log::info!("adapter: {} software={}", info.adapter, info.software);
                 self.adapter = if info.software { format!("{} (software)", info.adapter) } else { info.adapter.clone() };
+                self.render_luid = info.luid;
                 p.set_clear_color(crate::ui::BG_LINEAR);
                 self.presenter = Some(Arc::new(p));
             }
@@ -962,7 +1136,27 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let Some(w) = self.stats_win.as_mut()
+            && w.window.id() == id
+        {
+            if w.state.on_window_event(&w.window, &event).repaint {
+                w.needs_pass = true;
+            }
+            match event {
+                WindowEvent::CloseRequested => {
+                    self.stats_open = false;
+                    self.stats_win = None;
+                    self.needs_pass = true;
+                }
+                WindowEvent::Resized(size) => {
+                    w.presenter.resize(size.width, size.height);
+                    w.needs_pass = true;
+                }
+                _ => {}
+            }
+            return;
+        }
         if let (Some(state), Some(window)) = (self.egui_state.as_mut(), self.window.as_ref()) {
             let r = state.on_window_event(window, &event);
             if r.repaint {
@@ -989,6 +1183,8 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.exit();
             return;
         }
+        self.sync_stats_window(event_loop);
+        self.run_valve();
         if self.smoke_until.is_some_and(|t| Instant::now() >= t) {
             self.finish_smoke(event_loop);
             return;
@@ -1012,6 +1208,22 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.save_soon();
         if let Some(t) = self.repaint_at {
+            next = Some(next.map_or(t, |n| n.min(t)));
+        }
+        // The stats window refreshes twice a second while open.
+        if let Some(w) = &self.stats_win {
+            let due = w.last_pass + Duration::from_millis(500);
+            if w.needs_pass || Instant::now() >= due {
+                self.stats_pass();
+            }
+            if let Some(w) = &self.stats_win {
+                let t = w.last_pass + Duration::from_millis(500);
+                next = Some(next.map_or(t, |n| n.min(t)));
+            }
+        }
+        // The valve looks at the decoder every 2 s while streams play.
+        if !self.streams.is_empty() {
+            let t = self.valve.checked + Duration::from_secs(2);
             next = Some(next.map_or(t, |n| n.min(t)));
         }
         // A pending save wakes the loop once, even when nothing else moves.

@@ -339,7 +339,7 @@ impl Renderer {
                     epoch: Instant::now(),
                     shared,
                 },
-                DeviceInfo { adapter: adapter_name, software },
+                DeviceInfo { adapter: adapter_name, software, luid: (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart) },
             ))
         }
     }

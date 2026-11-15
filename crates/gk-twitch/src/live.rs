@@ -122,11 +122,14 @@ pub fn parse_media(text: &str) -> MediaPlaylist {
         } else if let Some(v) = line.strip_prefix("#EXT-X-DATERANGE:") {
             let is_ad = attr(v, "CLASS") == Some("twitch-stitched-ad")
                 || attr(v, "ID").is_some_and(|id| id.starts_with("stitched-ad-"));
-            if is_ad {
-                if let Some(start) = attr(v, "START-DATE").and_then(parse_pdt) {
-                    let dur: f64 = attr(v, "DURATION").and_then(|d| d.parse().ok()).unwrap_or(60.0);
-                    ad_ranges.push((start, start + dur));
-                }
+            if is_ad && let Some(start) = attr(v, "START-DATE").and_then(parse_pdt) {
+                // The end, from whatever the marker states; without one the
+                // break lasts until the next segment titled "live".
+                let end = attr(v, "END-DATE")
+                    .and_then(parse_pdt)
+                    .or_else(|| ["DURATION", "PLANNED-DURATION", "X-TV-TWITCH-AD-POD-FILLED-DURATION"].iter().find_map(|k| attr(v, k)?.parse::<f64>().ok()).map(|d| start + d))
+                    .unwrap_or(f64::INFINITY);
+                ad_ranges.push((start, end));
             }
         } else if let Some(url) = line.strip_prefix("#EXT-X-TWITCH-PREFETCH:") {
             let Some(last) = out.segments.last().cloned() else { continue };
@@ -143,7 +146,19 @@ pub fn parse_media(text: &str) -> MediaPlaylist {
             out.ended = true;
         } else if !line.is_empty() && !line.starts_with('#') {
             let title = pending_title.take().unwrap_or_default();
-            let ad = title.contains("Amazon") || in_ad(pending_pdt, &ad_ranges);
+            // Twitch titles real content "live": that never counts as an ad,
+            // whatever a marker without an end says.
+            let ad = title != "live" && (title.contains("Amazon") || in_ad(pending_pdt, &ad_ranges));
+            if title == "live" {
+                // Content is back: open ad ranges end here, and so does the
+                // ad's discontinuity (prefetch segments follow this one).
+                if let Some(p) = pending_pdt {
+                    for r in ad_ranges.iter_mut().filter(|r| r.0 <= p && r.1 > p) {
+                        r.1 = p;
+                    }
+                }
+                discontinuity = false;
+            }
             // Twitch sometimes puts a discontinuity between live segments.
             if !ad && out.segments.last().is_some_and(|s| !s.ad) {
                 discontinuity = false;
@@ -668,6 +683,7 @@ fn writer_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
                 written_init = Some(init_url.clone());
             }
         }
+        log::info!("segment {} {}{} start", seg.seq, if seg.prefetch { "prefetch " } else { "" }, if seg.init.is_some() { "fmp4" } else { "ts" });
         let chunks = match ahead.take() {
             Some((g, seq, rx)) if g == generation && seq == seg.seq => rx,
             _ => fetch(http, seg.url.clone(), stop.clone()),
@@ -702,6 +718,7 @@ fn writer_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     ok = false;
+                    log::warn!("segment {} timed out", seg.seq);
                     set_status(shared, cb, |s| s.last_error = Some(format!("segment {} timed out", seg.seq)));
                     break;
                 }
@@ -810,6 +827,34 @@ https://c/12.ts
         let p = parse_media(text);
         let ads: Vec<bool> = p.segments.iter().map(|s| s.ad).collect();
         assert_eq!(ads, [false, true, true, true]);
+    }
+
+    #[test]
+    fn live_segments_after_an_open_ended_ad_marker_are_content() {
+        // The pre-roll case that skipped two live segments (a 4 s hole).
+        let text = "#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:6
+#EXT-X-DATERANGE:ID=\"stitched-ad-9\",CLASS=\"twitch-stitched-ad\",START-DATE=\"2026-11-15T12:00:00.000Z\"
+#EXT-X-PROGRAM-DATE-TIME:2026-11-15T12:00:00.000Z
+#EXTINF:2.000,Amazon|1
+https://c/6.mp4
+#EXT-X-PROGRAM-DATE-TIME:2026-11-15T12:00:02.000Z
+#EXTINF:2.000,
+https://c/7.mp4
+#EXT-X-DISCONTINUITY
+#EXT-X-PROGRAM-DATE-TIME:2026-11-15T12:00:04.000Z
+#EXTINF:2.000,live
+https://c/8.mp4
+#EXT-X-PROGRAM-DATE-TIME:2026-11-15T12:00:06.000Z
+#EXTINF:2.000,live
+https://c/9.mp4
+#EXT-X-PROGRAM-DATE-TIME:2026-11-15T12:00:08.000Z
+#EXTINF:2.000,live
+https://c/10.mp4
+#EXT-X-TWITCH-PREFETCH:https://c/11.mp4
+";
+        let ads: Vec<(u64, bool)> = parse_media(text).segments.iter().map(|s| (s.seq, s.ad)).collect();
+        assert_eq!(ads, [(6, true), (7, true), (8, false), (9, false), (10, false), (11, false)]);
     }
 
     #[test]
