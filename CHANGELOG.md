@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.1
+
 - **Balancing:** streams move back toward the preferred GPUs while running: from the CPU to any GPU with room, and from a decoder at 60 % or more to an earlier GPU in order with room (the main GPU last), one stream every six seconds. Streams placed by hand (right-click) stay where they are (GK-2).
 - Stats: the download rate is averaged over four seconds instead of reading 0 between segments (GK-5); repeated and redrawn frames are counted for every stream again (GK-6).
 - The stats window no longer starts render workers it never uses.
