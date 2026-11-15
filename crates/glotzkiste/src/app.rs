@@ -3,7 +3,7 @@
 use crate::Options;
 use crate::chat_state::ChatState;
 use crate::images::Images;
-use crate::layout::{Pane, Preset, Tab};
+use crate::layout::{Pane, Preset, Tab, WindowGeom};
 use crate::stream::{Cmd, Env, Latency, Settings, StreamHandle};
 use crate::workers::Pool;
 use gk_render::{Presenter, UiFrame, VideoTile};
@@ -74,6 +74,10 @@ pub struct App {
     pub(crate) error: Option<String>,
     saved_json: String,
     save_check: Instant,
+    persist: bool,
+    /// Something that may change the saved state happened since the last check.
+    save_dirty: bool,
+    geom: Option<WindowGeom>,
     needs_pass: bool,
     repaint_at: Option<Instant>,
     smoke_until: Option<Instant>,
@@ -146,23 +150,34 @@ impl App {
         let chat = ChatState::new(creds, pool.clone(), client.clone(), wake.clone());
         let images = Images::new(pool.clone(), http, wake);
 
-        let (mut tabs, mut active, mut latency) = (Vec::new(), 0, Latency::Ultra);
+        // The saved state: always for the viewer; for smoke runs only from
+        // their own folder (they never touch the viewer's state).
+        if let Some(dir) = &options.state_dir {
+            crate::layout::set_dir(dir.clone());
+        }
+        let persist = !smoke || options.state_dir.is_some();
+        let (mut tabs, mut active, mut latency, mut geom) = (Vec::new(), 0, Latency::Ultra, None);
+        if persist && let Some(saved) = crate::layout::load() {
+            tabs = saved.tabs;
+            active = saved.active;
+            latency = saved.latency;
+            geom = saved.window;
+        }
         if !options.channels.is_empty() {
             let panes = options.channels.iter().map(|c| Pane::stream(c)).collect();
-            let mut tab = Tab::new("Main", panes);
+            let title = if tabs.is_empty() { "Main".to_owned() } else { format!("Tab {}", tabs.len() + 1) };
+            let mut tab = Tab::new(&title, panes);
             if options.chat {
                 let first = options.channels[0].clone();
                 tab.apply(Preset::Grid, Some(first));
             }
             tabs.push(tab);
-        } else if !smoke && let Some(saved) = crate::layout::load() {
-            tabs = saved.tabs;
-            active = saved.active;
-            latency = saved.latency;
+            active = tabs.len() - 1;
         }
         if tabs.is_empty() {
             tabs.push(Tab::new("Main", vec![]));
         }
+        active = active.min(tabs.len() - 1);
         let ctx = egui::Context::default();
         crate::ui::style(&ctx);
         Self {
@@ -203,6 +218,9 @@ impl App {
             error: None,
             saved_json: String::new(),
             save_check: Instant::now(),
+            persist,
+            save_dirty: false,
+            geom,
             needs_pass: true,
             repaint_at: None,
             started: Instant::now(),
@@ -463,15 +481,11 @@ impl App {
         self.images.poll(&self.ctx, self.presenter.as_deref());
     }
 
-    fn persist(&self) -> bool {
-        self.options.smoke.is_none() && self.options.channels.is_empty()
-    }
-
     fn save_now(&mut self) {
-        if !self.persist() {
+        if !self.persist {
             return;
         }
-        if let Some(json) = crate::layout::to_json(&self.tabs, self.active, self.latency)
+        if let Some(json) = crate::layout::to_json(&self.tabs, self.active, self.latency, self.geom)
             && json != self.saved_json
         {
             crate::layout::write(json.clone());
@@ -481,16 +495,55 @@ impl App {
 
     /// Saves the layout off the UI thread when it changed (checked every 2 s).
     fn save_soon(&mut self) {
-        if self.save_check.elapsed() < Duration::from_secs(2) || !self.persist() {
+        if !self.save_dirty || self.save_check.elapsed() < Duration::from_secs(2) || !self.persist {
             return;
         }
         self.save_check = Instant::now();
-        if let Some(json) = crate::layout::to_json(&self.tabs, self.active, self.latency)
+        self.save_dirty = false;
+        if let Some(json) = crate::layout::to_json(&self.tabs, self.active, self.latency, self.geom)
             && json != self.saved_json
         {
             self.saved_json = json.clone();
             self.pool.spawn(move || crate::layout::write(json));
         }
+    }
+
+    /// Remembers where the window is (not in smoke runs: those sit offscreen).
+    fn track_window(&mut self) {
+        if self.smoke_until.is_some() || self.options.smoke.is_some() {
+            return;
+        }
+        let Some(w) = &self.window else { return };
+        if w.is_minimized() == Some(true) {
+            return;
+        }
+        let maximized = w.is_maximized();
+        let size = w.inner_size();
+        let pos = w.outer_position().ok();
+        let mut g = self.geom.unwrap_or(WindowGeom { x: 0, y: 0, w: size.width, h: size.height, maximized });
+        g.maximized = maximized;
+        // Keep the normal size and place while maximized, so un-maximizing
+        // after a restart goes back to them.
+        if !maximized && size.width > 0 && size.height > 0 {
+            g.w = size.width;
+            g.h = size.height;
+            if let Some(p) = pos {
+                g.x = p.x;
+                g.y = p.y;
+            }
+        }
+        self.geom = Some(g);
+        self.save_dirty = true;
+    }
+
+    /// A one-line summary of the restored state (smoke runs).
+    fn describe_state(&self) -> String {
+        let tabs: Vec<String> = self
+            .tabs
+            .iter()
+            .map(|t| format!("{}[{}{}{}]", t.title, t.stream_channels().join(","), if t.has_chat() { " +chat" } else { "" }, t.audio.as_deref().map(|a| format!(" audio={a}")).unwrap_or_default()))
+            .collect();
+        format!("state: active={} latency={:?} tabs={}", self.active, self.latency, tabs.join(" "))
     }
 
     fn pass(&mut self) {
@@ -541,6 +594,7 @@ impl App {
         }
         self.sync_streams();
         self.refresh_info();
+        self.save_dirty = true;
         self.save_soon();
         self.pass_us += t0.elapsed().as_micros() as u64;
     }
@@ -591,6 +645,7 @@ impl App {
                 st.in_ad
             );
         }
+        println!("{}", self.describe_state());
         for (name, ch) in &self.chat.channels {
             println!("chat {name}: lines={} room_id={} emotes={}", ch.buffer.len(), ch.room_id, ch.emotes.len());
         }
@@ -606,6 +661,17 @@ impl ApplicationHandler<UserEvent> for App {
         use winit::platform::windows::WindowAttributesExtWindows;
         let (w, h) = self.options.size.unwrap_or((1600, 900));
         let mut attrs = Window::default_attributes().with_title("Glotzkiste").with_min_inner_size(LogicalSize::new(480.0, 270.0));
+        // Restore the saved place if it is still on a connected monitor.
+        let saved = self.geom.filter(|g| {
+            self.options.size.is_none()
+                && g.w >= 320
+                && g.h >= 200
+                && event_loop.available_monitors().any(|m| {
+                    let (p, s) = (m.position(), m.size());
+                    let (cx, cy) = (g.x + g.w as i32 / 2, g.y + 20);
+                    cx >= p.x && cx < p.x + s.width as i32 && cy >= p.y && cy < p.y + s.height as i32
+                })
+        });
         attrs = if self.smoke_until.is_some() {
             // Agent runs never show on the owner's screen (AGENTS.md).
             attrs
@@ -613,8 +679,10 @@ impl ApplicationHandler<UserEvent> for App {
                 .with_position(PhysicalPosition::new(-20000, -20000))
                 .with_skip_taskbar(true)
                 .with_active(false)
+        } else if let Some(g) = saved {
+            attrs.with_inner_size(PhysicalSize::new(g.w, g.h)).with_position(PhysicalPosition::new(g.x, g.y)).with_maximized(g.maximized)
         } else {
-            attrs.with_inner_size(LogicalSize::new(w as f64, h as f64))
+            attrs.with_inner_size(LogicalSize::new(w as f64, h as f64)).with_maximized(self.geom.is_some_and(|g| g.maximized))
         };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -674,9 +742,11 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(p) = &self.presenter {
                     p.resize(size.width, size.height);
                 }
+                self.track_window();
                 self.needs_pass = true;
             }
             WindowEvent::RedrawRequested => self.needs_pass = true,
+            WindowEvent::Moved(_) => self.track_window(),
             _ => {}
         }
     }
@@ -695,8 +765,14 @@ impl ApplicationHandler<UserEvent> for App {
             self.needs_pass = false;
             self.pass();
         }
+        self.save_soon();
         let mut next = self.smoke_until;
         if let Some(t) = self.repaint_at {
+            next = Some(next.map_or(t, |n| n.min(t)));
+        }
+        // A pending save wakes the loop once, even when nothing else moves.
+        if self.persist && self.save_dirty {
+            let t = self.save_check + Duration::from_secs(2);
             next = Some(next.map_or(t, |n| n.min(t)));
         }
         event_loop.set_control_flow(match next {

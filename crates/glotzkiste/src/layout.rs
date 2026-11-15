@@ -106,7 +106,6 @@ impl Tab {
             .collect()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn has_chat(&self) -> bool {
         self.tree.tiles.tiles().any(|t| matches!(t, Tile::Pane(Pane::Chat { .. })))
     }
@@ -237,15 +236,38 @@ impl Tab {
     }
 }
 
+/// The window's place on screen, in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WindowGeom {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub maximized: bool,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Saved {
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub latency: Latency,
+    #[serde(default)]
+    pub window: Option<WindowGeom>,
+}
+
+static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Keeps the state somewhere else (tests: never the viewer's own state).
+pub fn set_dir(dir: std::path::PathBuf) {
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = DIR.set(dir);
 }
 
 fn path() -> Option<std::path::PathBuf> {
-    gk_twitch::config_dir().map(|d| d.join("layout.json"))
+    match DIR.get() {
+        Some(d) => Some(d.join("layout.json")),
+        None => gk_twitch::config_dir().map(|d| d.join("layout.json")),
+    }
 }
 
 pub fn load() -> Option<Saved> {
@@ -260,14 +282,15 @@ pub fn load() -> Option<Saved> {
 }
 
 /// Serializes the state; the caller writes it off the UI thread.
-pub fn to_json(tabs: &[Tab], active: usize, latency: Latency) -> Option<String> {
+pub fn to_json(tabs: &[Tab], active: usize, latency: Latency, window: Option<WindowGeom>) -> Option<String> {
     #[derive(serde::Serialize)]
     struct Ref<'a> {
         tabs: &'a [Tab],
         active: usize,
         latency: Latency,
+        window: Option<WindowGeom>,
     }
-    serde_json::to_string(&Ref { tabs, active, latency }).ok()
+    serde_json::to_string(&Ref { tabs, active, latency, window }).ok()
 }
 
 pub fn write(json: String) {
@@ -326,9 +349,17 @@ mod tests {
     fn layout_round_trips_through_json() {
         let mut t = Tab::new("x", vec![Pane::stream("a"), Pane::stream("b")]);
         t.apply(Preset::Spotlight, Some("b".into()));
-        let json = to_json(std::slice::from_ref(&t), 0, Latency::Low).unwrap();
+        let geom = WindowGeom { x: 10, y: 20, w: 1280, h: 720, maximized: true };
+        let json = to_json(std::slice::from_ref(&t), 0, Latency::Low, Some(geom)).unwrap();
         let back: Saved = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tabs[0].stream_channels(), ["a", "b"]);
+        assert!(back.tabs[0].has_chat());
         assert_eq!(back.latency, Latency::Low);
+        assert_eq!(back.window, Some(geom));
+        // Files from before the window was saved still load.
+        let old = json.replace(",\"window\":{\"x\":10,\"y\":20,\"w\":1280,\"h\":720,\"maximized\":true}", "");
+        assert!(!old.contains("window"));
+        let back: Saved = serde_json::from_str(&old).unwrap();
+        assert_eq!(back.window, None);
     }
 }

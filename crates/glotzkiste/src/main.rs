@@ -30,6 +30,9 @@ Usage: glotzkiste [options] [CHANNEL...]
   --snapshot FILE   With --smoke: save a PNG of the window at the end
   --size WxH        Window size in pixels (default 1600x900)
   --pointer X,Y     With --smoke: a virtual mouse at X,Y (points), for snapshots
+  --state-dir DIR   Keep the saved layout in DIR (smoke runs save only then)
+
+Channels on the command line open in a new tab next to the restored ones.
   --help            This text
 ";
 
@@ -42,6 +45,7 @@ pub struct Options {
     pub snapshot: Option<std::path::PathBuf>,
     pub size: Option<(u32, u32)>,
     pub pointer: Option<(f32, f32)>,
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 fn parse(args: &[String]) -> Result<Option<Options>, String> {
@@ -62,6 +66,7 @@ fn parse(args: &[String]) -> Result<Option<Options>, String> {
                 let (x, y) = s.split_once(',').ok_or("--pointer needs X,Y")?;
                 o.pointer = Some((x.parse().map_err(|_| "bad x")?, y.parse().map_err(|_| "bad y")?));
             }
+            "--state-dir" => o.state_dir = Some(it.next().ok_or("--state-dir needs a folder")?.into()),
             "--snapshot" => o.snapshot = Some(it.next().ok_or("--snapshot needs a file")?.into()),
             "--size" => {
                 let s = it.next().ok_or("--size needs WxH")?;
