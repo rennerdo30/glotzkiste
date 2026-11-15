@@ -11,3 +11,14 @@ publish.workspace = true
 gk-mpv = { path = "../gk-mpv" }
 gk-twitch = { path = "../gk-twitch" }
 serde_json.workspace = true
+gk-render = { path = "../gk-render" }
+egui.workspace = true
+egui-winit.workspace = true
+egui_tiles.workspace = true
+winit.workspace = true
+serde.workspace = true
+log.workspace = true
+zstd = { version = "0.14.4", default-features = false }
+
+[build-dependencies]
+zstd = { version = "0.14.4", default-features = false, features = ["zstdmt"] }

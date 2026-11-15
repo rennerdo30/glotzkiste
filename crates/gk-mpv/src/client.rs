@@ -252,6 +252,12 @@ impl Mpv {
         *slot = Some(boxed);
     }
 
+    /// Interrupts a `wait_event` blocked on another thread.
+    pub fn wakeup(&self) {
+        // SAFETY: valid handle; thread-safe per client.h.
+        unsafe { (self.api().wakeup)(self.inner.handle) }
+    }
+
     /// Returns the next event, waiting up to `timeout` seconds (0: never wait).
     pub fn wait_event(&self, timeout: f64) -> Option<Event> {
         // SAFETY: valid handle; the returned event stays valid until the next

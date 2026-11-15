@@ -32,7 +32,8 @@ fn main() {
         match r.read(&mut buf) {
             Ok(0) => { println!("stream ended"); break; }
             Ok(n) => {
-                if first.is_none() { first = Some(t1.elapsed()); sync_ok = buf[0] == 0x47; }
+                if let Some(e) = feed.status().last_error { eprintln!("  err at {:?}: {e}", t1.elapsed()); }
+                if first.is_none() { first = Some(t1.elapsed()); sync_ok = buf[0] == 0x47; println!("first bytes: {:02x?} {:?}", &buf[..8.min(n)], String::from_utf8_lossy(&buf[4..8.min(n)])); }
                 total += n;
             }
             Err(e) => { println!("read error {e}"); break; }

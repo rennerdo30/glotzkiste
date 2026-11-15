@@ -28,6 +28,7 @@ pub const RENDER_PARAM_INVALID: c_int = 0;
 pub const RENDER_PARAM_API_TYPE: c_int = 1;
 pub const RENDER_PARAM_D3D11_INIT_PARAMS: c_int = 21;
 pub const RENDER_PARAM_D3D11_FBO: c_int = 22;
+pub const RENDER_PARAM_BLOCK_FOR_TARGET_TIME: c_int = 12;
 pub const RENDER_UPDATE_FRAME: u64 = 1;
 
 #[repr(C)]
@@ -115,6 +116,7 @@ pub struct Api {
     pub request_log_messages: unsafe extern "C" fn(*mut Handle, *const c_char) -> c_int,
     pub wait_event: unsafe extern "C" fn(*mut Handle, c_double) -> *mut Event,
     pub set_wakeup_callback: unsafe extern "C" fn(*mut Handle, Option<WakeupFn>, *mut c_void),
+    pub wakeup: unsafe extern "C" fn(*mut Handle),
     pub render_context_create: unsafe extern "C" fn(*mut *mut RenderContext, *mut Handle, *mut RenderParam) -> c_int,
     pub render_context_set_update_callback: unsafe extern "C" fn(*mut RenderContext, Option<WakeupFn>, *mut c_void),
     pub render_context_update: unsafe extern "C" fn(*mut RenderContext) -> u64,
@@ -153,6 +155,7 @@ impl Api {
             request_log_messages: sym!("mpv_request_log_messages"),
             wait_event: sym!("mpv_wait_event"),
             set_wakeup_callback: sym!("mpv_set_wakeup_callback"),
+            wakeup: sym!("mpv_wakeup"),
             render_context_create: sym!("mpv_render_context_create"),
             render_context_set_update_callback: sym!("mpv_render_context_set_update_callback"),
             render_context_update: sym!("mpv_render_context_update"),

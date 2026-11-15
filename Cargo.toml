@@ -11,7 +11,7 @@ repository = ""
 publish = false
 
 [workspace.dependencies]
-egui = "0.37.0"
+egui = { version = "0.37.0", features = ["default_fonts"] }
 egui-winit = { version = "0.37.0", default-features = false, features = ["clipboard", "links"] }
 egui_tiles = "0.18.0"
 winit = "0.30.13"

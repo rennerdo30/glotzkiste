@@ -81,10 +81,18 @@ impl RenderContext {
     /// # Safety
     /// `texture` must be a valid texture as described above. mpv changes the
     /// immediate context's state; the caller sets its own state afterwards.
-    pub unsafe fn render_d3d11(&mut self, texture: *mut c_void) -> Result<(), Error> {
+    ///
+    /// With `block` false, mpv returns at once instead of waiting for the
+    /// frame's display time (needed when one thread renders many players).
+    pub unsafe fn render_d3d11(&mut self, texture: *mut c_void, block: bool) -> Result<(), Error> {
         let mut fbo = ffi::D3d11Fbo { tex: texture };
+        let mut block_flag: std::ffi::c_int = block.into();
         let mut params = [
             ffi::RenderParam { kind: ffi::RENDER_PARAM_D3D11_FBO, data: (&mut fbo as *mut ffi::D3d11Fbo).cast() },
+            ffi::RenderParam {
+                kind: ffi::RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                data: (&mut block_flag as *mut std::ffi::c_int).cast(),
+            },
             ffi::RenderParam { kind: ffi::RENDER_PARAM_INVALID, data: std::ptr::null_mut() },
         ];
         // SAFETY: valid context and params.

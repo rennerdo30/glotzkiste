@@ -22,7 +22,7 @@ type SnapshotReply = mpsc::Sender<Result<(), String>>;
 struct Requests {
     ui: Option<UiFrame>,
     /// Texture changes of UI frames that were replaced before being drawn.
-    deltas: Vec<egui::TexturesDelta>,
+    deltas: egui::TexturesDelta,
     size: Option<(u32, u32)>,
     add: Vec<(u64, Mpv)>,
     remove: Vec<u64>,
@@ -34,6 +34,14 @@ struct Requests {
 }
 
 impl Requests {
+    /// Drops pending texture changes on purpose (shutting down).
+    fn clear_deltas(&mut self) {
+        self.deltas.clear();
+        if let Some(ui) = self.ui.as_mut() {
+            ui.textures_delta.clear();
+        }
+    }
+
     fn pending(&self) -> bool {
         self.ui.is_some()
             || !self.deltas.is_empty()
@@ -119,8 +127,8 @@ impl Presenter {
     /// changes are kept and applied in order.
     pub fn submit(&self, frame: UiFrame) {
         self.shared.update(|r| {
-            if let Some(old) = r.ui.take() {
-                r.deltas.push(old.textures_delta);
+            if let Some(mut old) = r.ui.take() {
+                r.deltas.append(std::mem::take(&mut old.textures_delta));
             }
             r.ui = Some(frame);
         });
@@ -164,6 +172,7 @@ impl Drop for Presenter {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+        self.shared.update(|r| r.clear_deltas());
     }
 }
 
@@ -350,6 +359,7 @@ impl Renderer {
                 std::mem::take(&mut *r)
             };
             if req.quit {
+                req.clear_deltas();
                 return;
             }
             // 2. Wait for the swap chain to accept a frame, so whatever
@@ -365,6 +375,7 @@ impl Renderer {
                 let more = std::mem::take(&mut *shared.requests.lock().unwrap_or_else(|p| p.into_inner()));
                 merge(&mut req, more);
                 if req.quit {
+                    req.clear_deltas();
                     return;
                 }
             }
@@ -396,12 +407,14 @@ impl Renderer {
                 self.resize(size);
                 draw = true;
             }
-            for d in &req.deltas {
-                self.egui.set_textures(&self.device, &self.context, d);
+            // All texture changes in order: undrawn older UIs first.
+            let mut delta = std::mem::take(&mut req.deltas);
+            let mut ui_frame = req.ui.take();
+            if let Some(ui) = ui_frame.as_mut() {
+                delta.append(std::mem::take(&mut ui.textures_delta));
             }
-            let mut frees: Vec<egui::TexturesDelta> = req.deltas;
-            if let Some(ui) = req.ui.take() {
-                self.egui.set_textures(&self.device, &self.context, &ui.textures_delta);
+            self.egui.set_textures(&self.device, &self.context, &delta);
+            if let Some(ui) = ui_frame.take() {
                 if let Err(e) = self.egui.upload(&self.device, &self.context, &ui.primitives, ui.pixels_per_point, self.size) {
                     log::error!("ui upload: {e}");
                 }
@@ -414,7 +427,6 @@ impl Renderer {
                     .filter(|u| **u & ANIM_BIT != 0)
                     .filter_map(|u| Some((*u, self.anims.get(u)?.index_at(now))))
                     .collect();
-                frees.push(ui.textures_delta);
                 stats.ui_frames.fetch_add(1, Ordering::Relaxed);
                 draw = true;
             }
@@ -447,9 +459,8 @@ impl Renderer {
                     Err(e) => log::error!("render failed: {e}"),
                 }
             }
-            for d in &frees {
-                self.egui.free_textures(d);
-            }
+            self.egui.free_textures(&delta);
+            delta.clear();
             stats.busy_us.fetch_add(busy.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
     }
@@ -492,7 +503,7 @@ impl Renderer {
             }
             if let Some((tex, _, _)) = &s.tex {
                 // SAFETY: a render-target texture on mpv's device.
-                match unsafe { s.render.render_d3d11(tex.as_raw()) } {
+                match unsafe { s.render.render_d3d11(tex.as_raw(), false) } {
                     Ok(()) => {
                         s.has_frame = true;
                         stats.video_frames.fetch_add(1, Ordering::Relaxed);
@@ -576,25 +587,26 @@ impl Renderer {
 }
 
 fn merge(into: &mut Requests, more: Requests) {
-    if let Some(ui) = more.ui {
-        if let Some(old) = into.ui.take() {
-            into.deltas.push(old.textures_delta);
+    let mut more = more;
+    if let Some(ui) = more.ui.take() {
+        if let Some(mut old) = into.ui.take() {
+            into.deltas.append(std::mem::take(&mut old.textures_delta));
         }
         into.ui = Some(ui);
     }
-    into.deltas.extend(more.deltas);
+    into.deltas.append(std::mem::take(&mut more.deltas));
     if more.size.is_some() {
         into.size = more.size;
     }
-    into.add.extend(more.add);
-    into.remove.extend(more.remove);
-    into.anim_add.extend(more.anim_add);
-    into.anim_remove.extend(more.anim_remove);
+    into.add.append(&mut more.add);
+    into.remove.append(&mut more.remove);
+    into.anim_add.append(&mut more.anim_add);
+    into.anim_remove.append(&mut more.anim_remove);
     if more.clear_color.is_some() {
         into.clear_color = more.clear_color;
     }
     if more.snapshot.is_some() {
-        into.snapshot = more.snapshot;
+        into.snapshot = more.snapshot.take();
     }
     into.quit |= more.quit;
 }
