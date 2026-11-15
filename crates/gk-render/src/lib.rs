@@ -11,7 +11,7 @@ mod d3d;
 #[cfg(windows)]
 mod egui_d3d;
 #[cfg(windows)]
-mod other_gpu;
+mod worker;
 
 use std::sync::atomic::AtomicU64;
 

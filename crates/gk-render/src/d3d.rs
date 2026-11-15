@@ -1,7 +1,7 @@
 //! Device, waitable swap chain, stream surfaces and the render loop.
 
 use crate::egui_d3d::{EguiRenderer, create_texture};
-use crate::other_gpu::Aux;
+use crate::worker::{Delivery, RING, Worker};
 use crate::{ANIM_BIT, AnimFrames, DeviceInfo, Stats, UiFrame, VideoTile};
 use gk_mpv::{FrameKind, Mpv, RenderContext};
 use std::collections::HashMap;
@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HANDLE, HMODULE, HWND, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE, HMODULE, HWND, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
-use windows::core::Interface;
+use windows::core::{Interface, PCWSTR};
 
 type SnapshotReply = mpsc::Sender<Result<(), String>>;
 
@@ -66,8 +66,8 @@ struct Shared {
     /// Set by any stream's mpv update callback (and by another GPU's
     /// thread when it finished a frame).
     video_dirty: AtomicBool,
-    /// The other GPUs' frames and tile sizes, once they run.
-    aux: Mutex<Vec<Arc<crate::other_gpu::Shared>>>,
+    /// Every render worker's frames and tile sizes.
+    workers: Mutex<Vec<Arc<crate::worker::Shared>>>,
 }
 
 impl Shared {
@@ -83,6 +83,15 @@ impl Shared {
     }
 }
 
+/// Where a stream is rendered when not on the render thread itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// A render worker on the main GPU (index into `Presenter::workers`).
+    Worker(usize),
+    /// The worker of another GPU.
+    Other((u32, i32)),
+}
+
 /// The handle the UI thread keeps. Every call returns at once, except the
 /// stream placement calls, which stream threads make.
 pub struct Presenter {
@@ -90,25 +99,39 @@ pub struct Presenter {
     thread: Option<JoinHandle<()>>,
     stats: Arc<Stats>,
     luid: (u32, i32),
-    /// Render threads of other GPUs, started on first use.
-    aux: Mutex<HashMap<(u32, i32), Arc<Aux>>>,
-    /// Streams drawn by another GPU, and which.
-    placed: Mutex<HashMap<u64, (u32, i32)>>,
+    /// Render workers on the main GPU (empty: the render thread renders
+    /// every stream itself).
+    workers: Vec<Arc<Worker>>,
+    /// Workers of other GPUs, started on first use.
+    others: Mutex<HashMap<(u32, i32), Arc<Worker>>>,
+    placed: Mutex<HashMap<u64, Place>>,
+    /// The render thread's fence as an NT handle (workers open it).
+    main_fence: Option<usize>,
 }
 
 /// How long a stream thread waits for a render thread to take or release a
 /// stream (normally a few milliseconds).
 const PLACE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Render workers on the main GPU: `GK_RENDER_WORKERS` (0 turns them off),
+/// else one per eight hardware threads, two to four.
+fn worker_count() -> usize {
+    if let Some(n) = std::env::var("GK_RENDER_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        return n.min(8);
+    }
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    (threads / 8).clamp(2, 4)
+}
+
 impl Presenter {
     /// Starts the render thread for `hwnd` and waits until its device and
-    /// swap chain exist (or failed).
+    /// swap chain exist (or failed), then the render workers.
     pub fn start(hwnd: isize, size: (u32, u32)) -> Result<(Self, DeviceInfo), String> {
         let shared = Arc::new(Shared {
             requests: Mutex::new(Requests::default()),
             wake: Condvar::new(),
             video_dirty: AtomicBool::new(false),
-            aux: Mutex::new(Vec::new()),
+            workers: Mutex::new(Vec::new()),
         });
         let stats = Arc::new(Stats::default());
         let (tx, rx) = mpsc::channel();
@@ -119,8 +142,8 @@ impl Presenter {
                 .spawn(move || {
                     let hwnd = HWND(hwnd as *mut _);
                     match Renderer::new(hwnd, size, shared.clone()) {
-                        Ok((renderer, info)) => {
-                            let _ = tx.send(Ok(info));
+                        Ok((renderer, info, fence)) => {
+                            let _ = tx.send(Ok((info, fence)));
                             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 renderer.run(&shared, &stats)
                             }));
@@ -135,15 +158,36 @@ impl Presenter {
                 })
                 .map_err(|e| e.to_string())?
         };
-        let info = rx.recv().map_err(|_| "the render thread stopped during start".to_owned())??;
+        let (info, main_fence) = rx.recv().map_err(|_| "the render thread stopped during start".to_owned())??;
         let luid = info.luid;
+        let mut workers = Vec::new();
+        if let Some(h) = main_fence.filter(|_| !info.software) {
+            for _ in 0..worker_count() {
+                let poke = shared.clone();
+                match Worker::start(luid, Delivery::Shared { main_fence: h }, Arc::new(move || poke.poke_video())) {
+                    Ok(w) => {
+                        if let Ok(mut v) = shared.workers.lock() {
+                            v.push(w.shared.clone());
+                        }
+                        workers.push(Arc::new(w));
+                    }
+                    Err(e) => {
+                        log::warn!("render workers unavailable, the render thread draws every stream: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+        log::info!("{} render workers on the main GPU", workers.len());
         let p = Self {
             shared,
             thread: Some(thread),
             stats,
             luid,
-            aux: Mutex::new(HashMap::new()),
+            workers,
+            others: Mutex::new(HashMap::new()),
             placed: Mutex::new(HashMap::new()),
+            main_fence,
         };
         Ok((p, info))
     }
@@ -172,8 +216,8 @@ impl Presenter {
         });
     }
 
-    /// Adds a stream; the render thread creates its mpv render context on
-    /// the shared device. Its video shows wherever a `VideoTile` names `id`.
+    /// Adds a stream to the render thread itself (see `place_stream`). Its
+    /// video shows wherever a `VideoTile` names `id`.
     pub fn add_stream(&self, id: u64, mpv: Mpv) {
         self.shared.update(|r| r.add.push((id, mpv, None)));
     }
@@ -186,54 +230,72 @@ impl Presenter {
         rx
     }
 
+    fn worker_of(&self, place: Place) -> Option<Arc<Worker>> {
+        match place {
+            Place::Worker(k) => self.workers.get(k).cloned(),
+            Place::Other(l) => self.others.lock().ok()?.get(&l).cloned(),
+        }
+    }
+
     pub fn remove_stream(&self, id: u64) {
-        let on = self.placed.lock().ok().and_then(|mut p| p.remove(&id));
-        if let Some(a) = on.and_then(|l| self.aux.lock().ok()?.get(&l).cloned()) {
-            a.remove(id, None);
+        let place = self.placed.lock().ok().and_then(|mut p| p.remove(&id));
+        if let Some(w) = place.and_then(|p| self.worker_of(p)) {
+            w.remove(id, None);
         }
         self.shared.update(|r| r.remove.push((id, None)));
     }
 
-    /// The render thread of the GPU with `luid`, started if needed.
-    fn aux_for(&self, luid: (u32, i32)) -> Result<Arc<Aux>, String> {
-        let mut map = self.aux.lock().map_err(|_| "GPU list poisoned")?;
-        if let Some(a) = map.get(&luid) {
-            return Ok(a.clone());
+    /// The worker of the GPU with `luid`, started if needed.
+    fn other_for(&self, luid: (u32, i32)) -> Result<Arc<Worker>, String> {
+        let mut map = self.others.lock().map_err(|_| "GPU list poisoned")?;
+        if let Some(w) = map.get(&luid) {
+            return Ok(w.clone());
         }
         let shared = self.shared.clone();
-        let a = Arc::new(Aux::start(luid, Arc::new(move || shared.poke_video()))?);
-        if let Ok(mut v) = self.shared.aux.lock() {
-            v.push(a.shared.clone());
+        let w = Arc::new(Worker::start(luid, Delivery::Readback, Arc::new(move || shared.poke_video()))?);
+        if let Ok(mut v) = self.shared.workers.lock() {
+            v.push(w.shared.clone());
         }
-        map.insert(luid, a.clone());
-        Ok(a)
+        map.insert(luid, w.clone());
+        Ok(w)
     }
 
-    fn attach_aux(&self, id: u64, mpv: &Mpv, luid: (u32, i32)) -> Result<(), String> {
-        let a = self.aux_for(luid)?;
+    fn attach(&self, id: u64, mpv: &Mpv, place: Place) -> Result<(), String> {
+        let w = match place {
+            Place::Worker(k) => self.workers.get(k).cloned().ok_or("no such render worker")?,
+            Place::Other(l) => self.other_for(l)?,
+        };
         let (tx, rx) = mpsc::channel();
-        a.add(id, mpv.clone(), tx);
-        rx.recv_timeout(PLACE_TIMEOUT).unwrap_or_else(|_| Err("that GPU did not answer".into()))?;
+        w.add(id, mpv.clone(), tx);
+        rx.recv_timeout(PLACE_TIMEOUT).unwrap_or_else(|_| Err("the render worker did not answer".into()))?;
         if let Ok(mut p) = self.placed.lock() {
-            p.insert(id, luid);
+            p.insert(id, place);
         }
-        // That GPU needs the tile size now, not at the next UI change.
+        // The worker needs the tile size now, not at the next UI change.
         self.shared.update(|r| r.resend_sizes = true);
         Ok(())
     }
 
-    /// Creates a stream's render context (and so its video decoder) on the
-    /// GPU with `luid` (`None` or the main GPU's LUID: the main GPU, zero
-    /// copy). Another GPU renders the stream at tile size and its frames are
-    /// copied over. Falls back to the main GPU if that GPU fails. Blocks the
-    /// calling stream thread a few milliseconds; returns where the stream
-    /// went (`None`: the main GPU) and the error that sent it there.
+    /// Creates a stream's render context (and so its video decoder): on the
+    /// GPU with `luid` if that is another GPU (rendered at tile size there,
+    /// frames copied over), else on the main GPU, by the least busy render
+    /// worker (or the render thread itself). Falls back to the main GPU if
+    /// another GPU fails. Blocks the calling stream thread a few
+    /// milliseconds; returns where the stream went (`None`: the main GPU)
+    /// and the error that sent it there.
     pub fn place_stream(&self, id: u64, mpv: &Mpv, luid: Option<(u32, i32)>) -> (Option<(u32, i32)>, Option<String>) {
         let mut err = None;
         if let Some(l) = luid.filter(|l| *l != self.luid) {
-            match self.attach_aux(id, mpv, l) {
+            match self.attach(id, mpv, Place::Other(l)) {
                 Ok(()) => return (Some(l), None),
                 Err(e) => err = Some(e),
+            }
+        }
+        let least = (0..self.workers.len()).min_by_key(|k| self.workers[*k].shared.streams.load(Ordering::Relaxed));
+        if let Some(k) = least {
+            match self.attach(id, mpv, Place::Worker(k)) {
+                Ok(()) => return (None, err),
+                Err(e) => log::warn!("stream {id}: render worker: {e}; on the render thread"),
             }
         }
         let _ = self.add_stream_ready(id, mpv.clone()).recv_timeout(PLACE_TIMEOUT);
@@ -246,26 +308,27 @@ impl Presenter {
     pub fn move_stream(&self, id: u64, mpv: &Mpv, luid: Option<(u32, i32)>) -> (Option<(u32, i32)>, Option<String>) {
         let to = luid.filter(|l| *l != self.luid);
         let from = self.placed.lock().ok().and_then(|p| p.get(&id).copied());
-        if from == to {
+        let from_gpu = match from {
+            Some(Place::Other(l)) => Some(l),
+            _ => None,
+        };
+        if from_gpu == to {
             return (to, None);
         }
         // mpv has one render context at a time: free the current one first.
-        let (tx, rx) = mpsc::channel();
-        match from.and_then(|l| self.aux.lock().ok()?.get(&l).cloned()) {
-            Some(a) => {
-                if let Ok(mut p) = self.placed.lock() {
-                    p.remove(&id);
-                }
-                let (atx, arx) = mpsc::channel();
-                a.remove(id, Some(atx));
-                let _ = arx.recv_timeout(PLACE_TIMEOUT);
-                // The main render thread drops the uploaded frame texture.
-                self.shared.update(|r| r.remove.push((id, Some(tx))));
+        if let Some(w) = from.and_then(|p| self.worker_of(p)) {
+            if let Ok(mut p) = self.placed.lock() {
+                p.remove(&id);
             }
-            None => self.shared.update(|r| r.remove.push((id, Some(tx)))),
+            let (tx, rx) = mpsc::channel();
+            w.remove(id, Some(tx));
+            let _ = rx.recv_timeout(PLACE_TIMEOUT);
         }
+        // The render thread drops its context or textures of the stream.
+        let (tx, rx) = mpsc::channel();
+        self.shared.update(|r| r.remove.push((id, Some(tx))));
         if rx.recv_timeout(PLACE_TIMEOUT).is_err() {
-            return (from, Some("the render thread did not release the stream".into()));
+            return (from_gpu, Some("the render thread did not release the stream".into()));
         }
         self.place_stream(id, mpv, to)
     }
@@ -294,8 +357,16 @@ impl Presenter {
 
 impl Drop for Presenter {
     fn drop(&mut self) {
-        if let Ok(mut a) = self.aux.lock() {
-            a.clear();
+        self.workers.clear();
+        if let Ok(mut o) = self.others.lock() {
+            o.clear();
+        }
+        if let Some(h) = self.main_fence.take() {
+            // SAFETY: the NT handle the render thread created for the workers,
+            // which are gone now.
+            unsafe {
+                let _ = CloseHandle(HANDLE(h as *mut _));
+            }
         }
         self.shared.update(|r| r.quit = true);
         if let Some(t) = self.thread.take() {
@@ -319,7 +390,19 @@ struct Surface {
     fresh: bool,
 }
 
-/// A stream drawn by the second GPU: its newest frame, uploaded.
+/// A stream a render worker on the main GPU draws: its shared textures.
+struct Linked {
+    /// `worker::Shared::index` of that worker.
+    worker: usize,
+    generation: u64,
+    views: Vec<ID3D11ShaderResourceView>,
+    /// The newest frame (texture, worker fence value) not yet waited for.
+    ready: Option<(usize, u64)>,
+    /// The texture the next present samples.
+    shown: Option<usize>,
+}
+
+/// A stream drawn by another GPU: its newest frame, uploaded.
 struct Remote {
     tex: ID3D11Texture2D,
     view: ID3D11ShaderResourceView,
@@ -390,6 +473,13 @@ struct Renderer {
     videos: Vec<VideoTile>,
     surfaces: HashMap<u64, Surface>,
     remotes: HashMap<u64, Remote>,
+    linked: HashMap<u64, Linked>,
+    /// Render workers' fences, by worker index.
+    worker_fences: HashMap<usize, ID3D11Fence>,
+    /// This thread's fence: signalled after each present, so workers know
+    /// when a texture is free again.
+    fence: Option<(ID3D11DeviceContext4, ID3D11Fence)>,
+    fence_value: u64,
     anims: HashMap<u64, Anim>,
     /// Animations drawn by the current UI and the frame each shows.
     visible_anims: Vec<(u64, usize)>,
@@ -435,7 +525,7 @@ fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, bool), String> 
 }
 
 impl Renderer {
-    fn new(hwnd: HWND, size: (u32, u32), shared: Arc<Shared>) -> Result<(Self, DeviceInfo), String> {
+    fn new(hwnd: HWND, size: (u32, u32), shared: Arc<Shared>) -> Result<(Self, DeviceInfo, Option<usize>), String> {
         let (device, context, software) = create_device()?;
         let e = |e: windows::core::Error| e.to_string();
         // SAFETY: COM calls on valid interfaces with valid descriptors.
@@ -469,6 +559,23 @@ impl Renderer {
             swap_chain.SetMaximumFrameLatency(1).map_err(e)?;
             let waitable = swap_chain.GetFrameLatencyWaitableObject();
             let egui = EguiRenderer::new(&device)?;
+            // A fence render workers can open (Windows 10 1703+, WDDM 2.2+);
+            // without it the render thread draws every stream itself.
+            let fence = (|| -> windows::core::Result<(ID3D11DeviceContext4, ID3D11Fence, usize)> {
+                let device5: ID3D11Device5 = device.cast()?;
+                let mut fence: Option<ID3D11Fence> = None;
+                device5.CreateFence(0, D3D11_FENCE_FLAG_SHARED, &mut fence)?;
+                let fence = fence.ok_or_else(windows::core::Error::empty)?;
+                let handle = fence.CreateSharedHandle(None, GENERIC_ALL.0, PCWSTR::null())?;
+                Ok((context.cast()?, fence, handle.0 as usize))
+            })();
+            let (fence, fence_handle) = match fence {
+                Ok((c, f, h)) => (Some((c, f)), Some(h)),
+                Err(e) => {
+                    log::warn!("no shared GPU fence: {e}");
+                    (None, None)
+                }
+            };
             Ok((
                 Self {
                     device,
@@ -481,6 +588,10 @@ impl Renderer {
                     videos: Vec::new(),
                     surfaces: HashMap::new(),
                     remotes: HashMap::new(),
+                    linked: HashMap::new(),
+                    worker_fences: HashMap::new(),
+                    fence,
+                    fence_value: 0,
                     anims: HashMap::new(),
                     visible_anims: Vec::new(),
                     clear: [0.04, 0.04, 0.05, 1.0],
@@ -492,6 +603,7 @@ impl Renderer {
                     software,
                     luid: (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart),
                 },
+                fence_handle,
             ))
         }
     }
@@ -580,6 +692,7 @@ impl Renderer {
             for (id, done) in req.remove {
                 self.surfaces.remove(&id);
                 self.remotes.remove(&id);
+                self.linked.remove(&id);
                 if let Ok(mut t) = stats.tiles.lock() {
                     t.remove(&id);
                 }
@@ -644,7 +757,7 @@ impl Renderer {
             if self.render_streams(stats, poked) {
                 draw = true;
             }
-            if poked && self.upload_remote(stats) {
+            if poked && self.collect_workers(stats) {
                 draw = true;
             }
             // 4. Animations whose frame changed.
@@ -678,9 +791,9 @@ impl Renderer {
         }
     }
 
-    /// Tells the other GPUs the tile sizes (they render at tile size too).
+    /// Tells the render workers the tile sizes (they render at tile size).
     fn send_aux_sizes(&self) {
-        let auxes = self.shared.aux.lock().map(|a| a.clone()).unwrap_or_default();
+        let auxes = self.shared.workers.lock().map(|a| a.clone()).unwrap_or_default();
         for aux in auxes {
             if let Ok(mut sizes) = aux.sizes.lock() {
                 sizes.clear();
@@ -689,19 +802,87 @@ impl Renderer {
         }
     }
 
-    /// Uploads the frames other GPUs finished. True if a visible one
-    /// changed.
-    fn upload_remote(&mut self, stats: &Stats) -> bool {
-        let auxes = self.shared.aux.lock().map(|a| a.clone()).unwrap_or_default();
+    /// Opens a worker's new shared textures.
+    fn open_ring(&self, ring: &crate::worker::Ring) -> windows::core::Result<Vec<ID3D11ShaderResourceView>> {
+        let mut views = Vec::with_capacity(RING);
+        for h in ring.handles {
+            // SAFETY: a legacy shared handle of a texture on this GPU.
+            unsafe {
+                let mut tex: Option<ID3D11Texture2D> = None;
+                self.device.OpenSharedResource(HANDLE(h as *mut _), &mut tex)?;
+                let tex = tex.ok_or_else(windows::core::Error::empty)?;
+                let mut v = None;
+                self.device.CreateShaderResourceView(&tex, None, Some(&mut v))?;
+                views.push(v.ok_or_else(windows::core::Error::empty)?);
+            }
+        }
+        Ok(views)
+    }
+
+    /// Takes what the render workers finished: frames in shared textures
+    /// (main GPU) and read-back frames to upload (other GPUs). True if a
+    /// visible one changed.
+    fn collect_workers(&mut self, stats: &Stats) -> bool {
+        let workers = self.shared.workers.lock().map(|a| a.clone()).unwrap_or_default();
         let mut frames = Vec::new();
-        for aux in auxes {
-            if let Ok(mut f) = aux.frames.lock()
+        let mut changed = false;
+        for w in &workers {
+            if !self.worker_fences.contains_key(&w.index)
+                && let Some(h) = w.fence.lock().ok().and_then(|mut f| f.take())
+            {
+                // SAFETY: the worker's fence NT handle, closed after opening.
+                unsafe {
+                    let handle = HANDLE(h as *mut _);
+                    let opened = self.device.cast::<ID3D11Device5>().and_then(|d| {
+                        let mut f: Option<ID3D11Fence> = None;
+                        d.OpenSharedFence(handle, &mut f)?;
+                        f.ok_or_else(windows::core::Error::empty)
+                    });
+                    match opened {
+                        Ok(f) => {
+                            self.worker_fences.insert(w.index, f);
+                        }
+                        Err(e) => log::error!("render worker {} fence: {e}", w.index),
+                    }
+                    let _ = CloseHandle(handle);
+                }
+            }
+            let rings = w.rings.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default();
+            for (id, ring) in rings {
+                match self.open_ring(&ring) {
+                    Ok(views) => {
+                        let l =
+                            Linked { worker: w.index, generation: ring.generation, views, ready: None, shown: None };
+                        self.linked.insert(id, l);
+                        if let Ok(mut t) = stats.tiles.lock() {
+                            (t.entry(id).or_default().width, t.entry(id).or_default().height) = ring.size;
+                        }
+                    }
+                    Err(e) => log::error!("stream {id}: shared textures: {e}"),
+                }
+            }
+            let published = w.published.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
+            for (id, p) in published {
+                let Some(l) = self.linked.get_mut(&id) else { continue };
+                if l.generation != p.generation {
+                    continue;
+                }
+                l.ready = Some((p.index, p.value));
+                let visible = self.videos.iter().any(|v| v.id == id);
+                stats.video_frames.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut t) = stats.tiles.lock() {
+                    let e = t.entry(id).or_default();
+                    e.frames += 1;
+                    e.visible = visible;
+                }
+                changed |= visible;
+            }
+            if let Ok(mut f) = w.frames.lock()
                 && !f.is_empty()
             {
                 frames.extend(std::mem::take(&mut *f));
             }
         }
-        let mut changed = false;
         for (id, f) in frames {
             let t = Instant::now();
             let size = (f.width, f.height);
@@ -743,6 +924,7 @@ impl Renderer {
 
     fn add_surface(&mut self, id: u64, mpv: &Mpv) {
         self.remotes.remove(&id);
+        self.linked.remove(&id);
         // SAFETY: our device was created without SINGLETHREADED.
         match unsafe { RenderContext::new_d3d11(mpv, self.device.as_raw()) } {
             Ok(mut render) => {
@@ -873,14 +1055,30 @@ impl Renderer {
             }
             let Some((tex, rtv)) = self.target.clone() else { return Ok(()) };
             self.context.ClearRenderTargetView(&rtv, &self.clear);
+            // Frames from render workers: this GPU waits until the worker
+            // finished drawing them (no CPU wait).
+            if let Some((ctx4, _)) = &self.fence {
+                for l in self.linked.values_mut() {
+                    if let Some((i, value)) = l.ready.take()
+                        && let Some(f) = self.worker_fences.get(&l.worker)
+                    {
+                        let _ = ctx4.Wait(f, value);
+                        l.shown = Some(i);
+                    }
+                }
+            }
             let now = self.now_ms();
             let surfaces = &self.surfaces;
             let remotes = &self.remotes;
+            let linked = &self.linked;
             let anims = &self.anims;
             let lookup = |u: u64| -> Option<ID3D11ShaderResourceView> {
                 if u & ANIM_BIT != 0 {
                     let a = anims.get(&u)?;
                     return Some(a.frames.get(a.index_at(now))?.0.clone());
+                }
+                if let Some(l) = linked.get(&u) {
+                    return l.shown.and_then(|i| l.views.get(i).cloned());
                 }
                 if let Some(r) = remotes.get(&u) {
                     return Some(r.view.clone());
@@ -896,6 +1094,25 @@ impl Renderer {
                 let _ = reply.send(write_snapshot(&self.device, &self.context, &tex, &path));
             }
             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok().map_err(e)?;
+            // Once this frame's GPU work is done, its worker textures are free.
+            if let Some((ctx4, fence)) = &self.fence
+                && !self.linked.is_empty()
+            {
+                self.fence_value += 1;
+                let _ = ctx4.Signal(fence, self.fence_value);
+                let workers = self.shared.workers.lock().map(|a| a.clone()).unwrap_or_default();
+                for w in workers {
+                    let Ok(mut released) = w.released.lock() else { continue };
+                    for (id, l) in self.linked.iter().filter(|(_, l)| l.worker == w.index) {
+                        let Some(i) = l.shown else { continue };
+                        let entry = released.entry(*id).or_insert((l.generation, [0; RING]));
+                        if entry.0 != l.generation {
+                            *entry = (l.generation, [0; RING]);
+                        }
+                        entry.1[i] = self.fence_value;
+                    }
+                }
+            }
             // Only streams whose new frame this present showed.
             for s in self.surfaces.values_mut() {
                 if std::mem::take(&mut s.fresh) {

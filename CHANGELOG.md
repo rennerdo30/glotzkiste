@@ -4,6 +4,7 @@
 
 - **Every GPU:** streams decode on the other GPUs first (integrated ones too) and on the GPU drawing the window last; a full decoder hands streams on to the next GPU with room, the CPU last. Frames of streams on another GPU are copied over at tile size without waiting for that GPU (0.2 ms per frame measured). Right-click a stream to choose where it decodes; the stats show which GPU decodes each stream.
 - Auto quality steps down per GPU, only where that decoder is busy.
+- **Rendering on several threads:** streams render on two to four worker threads, each with its own device on the GPU, into textures the window shares (no copies); the thread that presents only composes. Twelve streams: that thread from 16 % to 3.4 % of a core.
 - **Stats show what holds each stream back:** network, the broadcast itself (fewer frames than its variant says), the decoder (with that GPU's load), the GPU copy or the display, with the numbers behind it, and a count over the tab. The table fills the window with fixed columns that no longer jump.
 
 ## 1.0.0
