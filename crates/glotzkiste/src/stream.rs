@@ -444,7 +444,33 @@ impl Control {
             self.set(|s| s.state = State::Error(e.to_string()));
             return;
         }
+        let mut last_sample = Instant::now() - Duration::from_secs(1);
         loop {
+            if STATS_ON.load(Ordering::Relaxed) && last_sample.elapsed() >= Duration::from_millis(500) {
+                last_sample = Instant::now();
+                let d = |n: &str| mpv.get_double(n).unwrap_or(0.0);
+                let i = |n: &str| mpv.get_i64(n).unwrap_or(0);
+                let snap = StreamStats {
+                    sampled: Some(last_sample),
+                    decoded_fps: d("estimated-vf-fps"),
+                    source_fps: d("container-fps"),
+                    drops_vo: i("frame-drop-count"),
+                    drops_decoder: i("decoder-frame-drop-count"),
+                    delayed: i("vo-delayed-frame-count"),
+                    mistimed: i("mistimed-frame-count"),
+                    width: i("video-params/w"),
+                    height: i("video-params/h"),
+                    codec: mpv.get_string("video-format").unwrap_or_default(),
+                    hwdec: mpv.get_string("hwdec-current").unwrap_or_default(),
+                    cache_s: d("demuxer-cache-duration").min(0.2),
+                    speed: 1.0,
+                    container: "generated".into(),
+                    ..Default::default()
+                };
+                if let Ok(mut s) = self.stats.lock() {
+                    *s = snap;
+                }
+            }
             loop {
                 match self.rx.try_recv() {
                     Ok(Cmd::Stop) | Err(TryRecvError::Disconnected) => return,

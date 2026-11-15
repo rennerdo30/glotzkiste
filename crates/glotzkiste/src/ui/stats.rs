@@ -432,7 +432,8 @@ pub fn contents(ui: &mut egui::Ui, mut c: Ctx<'_>) {
         .iter()
         .filter_map(|t| match &t.kind {
             TileKind::Chat { channel } => Some(format!(
-                "{channel} ({} kept)",
+                "{} ({} kept)",
+                channel.replace('~', ""),
                 channel.split(" + ").map(|ch| c.chat_lines.get(ch).copied().unwrap_or(0)).sum::<usize>()
             )),
             _ => None,
@@ -465,6 +466,7 @@ fn stream_map(ui: &mut egui::Ui, c: &Ctx<'_>, streams: &[&TileRect]) {
     let to_map = |r: Rect| Rect::from_min_max(map.min + (r.min - src.min) * scale, map.min + (r.max - src.min) * scale);
     for t in streams {
         let TileKind::Stream { id, channel } = &t.kind else { continue };
+        let channel = channel.trim_start_matches('~');
         let cell = to_map(t.rect).shrink(2.0);
         ui.painter().rect_filled(cell, 6.0, PANEL);
         ui.painter().rect_stroke(cell, 6.0, egui::Stroke::new(1.0, RAISED), egui::StrokeKind::Inside);
@@ -498,7 +500,7 @@ fn stream_rows(ui: &mut egui::Ui, c: &mut Ctx<'_>, streams: &[&TileRect]) {
             TileKind::Stream { id, channel } => Some(Row {
                 order,
                 id: *id,
-                name: channel.clone(),
+                name: channel.trim_start_matches('~').to_owned(),
                 status: c.statuses.get(id).cloned().unwrap_or_default(),
                 s: c.stats.get(id).cloned().unwrap_or_default(),
                 shown: c.rates.tile_fps.get(id).copied().unwrap_or(0.0),
