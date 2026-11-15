@@ -79,6 +79,9 @@ pub struct TileStats {
     /// Renders mpv asked for that were not a new picture.
     pub repeats: u64,
     pub redraws: u64,
+    /// Frames copied over from another GPU and the time that took (us).
+    pub copied: u64,
+    pub copy_us: u64,
 }
 
 /// What the render thread reports once it is up.

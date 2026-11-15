@@ -587,13 +587,28 @@ impl App {
     }
 
     /// One pass of the stats window (twice a second, and on input).
+    /// Updates the stats rates (at most once a second).
+    fn sample_stats(&mut self, p: &Presenter) {
+        let drops = self
+            .streams
+            .iter()
+            .map(|(id, s)| {
+                let st = s.stats();
+                (*id, (st.drops_vo, st.drops_decoder))
+            })
+            .collect();
+        let gpus = self.gpus.lock().map(|g| g.clone()).unwrap_or_default();
+        self.sampler.sample(&p.stats(), self.passes, self.pass_us, drops, &gpus, self.render_luid);
+    }
+
     fn stats_pass(&mut self) {
         let Some(w) = self.stats_win.as_mut() else { return };
         w.needs_pass = false;
         w.last_pass = Instant::now();
-        if let Some(p) = &self.presenter {
-            self.sampler.sample(&p.stats(), self.passes, self.pass_us);
+        if let Some(p) = self.presenter.clone() {
+            self.sample_stats(&p);
         }
+        let Some(w) = self.stats_win.as_mut() else { return };
         let raw = w.state.take_egui_input(&w.window);
         let ids: Vec<u64> = self.streams.keys().copied().collect();
         let gpus = self.gpus.lock().map(|g| g.clone()).unwrap_or_default();
@@ -1106,8 +1121,8 @@ impl App {
         self.images.frame += 1;
         let stats_shown = self.stats_open || self.stats_on_tiles;
         crate::stream::STATS_ON.store(stats_shown, std::sync::atomic::Ordering::Relaxed);
-        if stats_shown && let Some(p) = &self.presenter {
-            self.sampler.sample(&p.stats(), self.passes, self.pass_us);
+        if stats_shown && let Some(p) = self.presenter.clone() {
+            self.sample_stats(&p);
         }
         let ctx = self.ctx.clone();
         let full = ctx.run_ui(raw, |ui| {

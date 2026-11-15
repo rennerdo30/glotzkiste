@@ -40,6 +40,13 @@ pub struct Rates {
     /// Repeat and redraw renders per second (no new picture).
     pub tile_extra: HashMap<u64, (f64, f64)>,
     pub tiles: HashMap<u64, TileStats>,
+    /// Milliseconds per frame copied over from another GPU, per stream.
+    pub tile_copy_ms: HashMap<u64, f64>,
+    /// Dropped frames per second per stream: (at the output, in the decoder).
+    pub drop_rates: HashMap<u64, (f64, f64)>,
+    /// Video-decoder load per GPU and the GPU drawing the window.
+    pub gpu_load: HashMap<(u32, i32), f64>,
+    pub main_luid: (u32, i32),
 }
 
 struct Snap {
@@ -52,6 +59,8 @@ struct Snap {
     cpu_100ns: u64,
     tiles: HashMap<u64, u64>,
     extra: HashMap<u64, (u64, u64)>,
+    copies: HashMap<u64, (u64, u64)>,
+    drops: HashMap<u64, (i64, i64)>,
 }
 
 #[derive(Default)]
@@ -91,8 +100,17 @@ fn process_usage() -> (u64, u64) {
 }
 
 impl Sampler {
-    /// Updates the rates at most once a second.
-    pub fn sample(&mut self, st: &Stats, passes: u64, pass_us: u64) {
+    /// Updates the rates at most once a second. `drops`: each stream's
+    /// dropped frames so far (output, decoder).
+    pub fn sample(
+        &mut self,
+        st: &Stats,
+        passes: u64,
+        pass_us: u64,
+        drops: HashMap<u64, (i64, i64)>,
+        gpus: &[crate::gpu::Gpu],
+        main_luid: (u32, i32),
+    ) {
         if self.last.as_ref().is_some_and(|l| l.at.elapsed().as_millis() < 900) {
             return;
         }
@@ -109,6 +127,8 @@ impl Sampler {
             cpu_100ns: cpu,
             tiles: tiles.iter().map(|(k, v)| (*k, v.frames)).collect(),
             extra: tiles.iter().map(|(k, v)| (*k, (v.repeats, v.redraws))).collect(),
+            copies: tiles.iter().map(|(k, v)| (*k, (v.copied, v.copy_us))).collect(),
+            drops,
         };
         if let Some(l) = &self.last {
             let dt = now.at.duration_since(l.at).as_secs_f64().max(0.001);
@@ -147,6 +167,26 @@ impl Sampler {
                         (*k, (per(*rp, lrp), per(*rd, lrd)))
                     })
                     .collect(),
+                tile_copy_ms: now
+                    .copies
+                    .iter()
+                    .filter_map(|(k, (n, us))| {
+                        let (ln, lus) = l.copies.get(k).copied().unwrap_or((*n, *us));
+                        let frames = n.saturating_sub(ln);
+                        (frames > 0).then(|| (*k, us.saturating_sub(lus) as f64 / 1000.0 / frames as f64))
+                    })
+                    .collect(),
+                drop_rates: now
+                    .drops
+                    .iter()
+                    .map(|(k, (vo, dec))| {
+                        let (lvo, ldec) = l.drops.get(k).copied().unwrap_or((*vo, *dec));
+                        let r = |a: i64, b: i64| (a - b).max(0) as f64 / dt;
+                        (*k, (r(*vo, lvo), r(*dec, ldec)))
+                    })
+                    .collect(),
+                gpu_load: gpus.iter().map(|g| (g.luid, g.decode_pct)).collect(),
+                main_luid,
                 tiles,
             };
         }
@@ -189,6 +229,9 @@ pub fn stream_table(
         if s.sampled.is_none() {
             row(ui, "", RichText::new("measuring…").color(MUTED));
             return;
+        }
+        if let Some((limit, detail)) = bottleneck(status, s, rates, stream_id) {
+            row(ui, "Holding back", RichText::new(format!("{} · {detail}", limit.label())).color(limit.color()));
         }
         let container = match s.container.as_str() {
             "Fmp4" => "fMP4",
@@ -320,6 +363,121 @@ pub struct Ctx<'a> {
     pub state: &'a mut Ui,
 }
 
+/// What holds a stream back, in the order a frame travels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Limit {
+    /// Data arrives slower than the stream needs it.
+    Network,
+    /// The broadcast itself sends fewer frames than its variant says.
+    Source,
+    /// The video decoder cannot keep up.
+    Decoder,
+    /// Frames from another GPU arrive late.
+    Copy,
+    /// Frames are dropped or late at the display.
+    Display,
+    /// Nothing: the stream keeps up.
+    None,
+}
+
+impl Limit {
+    pub fn label(self) -> &'static str {
+        match self {
+            Limit::Network => "Network",
+            Limit::Source => "Source",
+            Limit::Decoder => "Decoder",
+            Limit::Copy => "GPU copy",
+            Limit::Display => "Display",
+            Limit::None => "Nothing",
+        }
+    }
+
+    pub fn color(self) -> Color32 {
+        match self {
+            Limit::None => GOOD,
+            Limit::Source => TEXT,
+            _ => WARN,
+        }
+    }
+}
+
+/// The frame rate a variant name promises ("1080p60" -> 60).
+fn named_fps(variant: &str) -> Option<f64> {
+    let (_, rate) = variant.split_once('p')?;
+    rate.parse::<f64>().ok()
+}
+
+/// What holds a playing, visible stream back right now, with the numbers
+/// that show it. `None` while there is nothing to judge.
+pub fn bottleneck(status: &Status, s: &StreamStats, rates: &Rates, id: u64) -> Option<(Limit, String)> {
+    use crate::stream::DecodeOn;
+    let tile = rates.tiles.get(&id).copied().unwrap_or_default();
+    if !matches!(status.state, State::Playing) || status.in_ad || s.sampled.is_none() || !tile.visible {
+        return None;
+    }
+    let expected = if s.source_fps > 0.0 { s.source_fps * s.speed.max(0.5) } else { 0.0 };
+    let shown = rates.tile_fps.get(&id).copied().unwrap_or(0.0);
+    let (out_drops, dec_drops) = rates.drop_rates.get(&id).copied().unwrap_or_default();
+    let behind = s.cache_s + s.pipe_s;
+    let bitrate = s.video_kbps + s.audio_kbps;
+    let generated = s.container == "generated";
+    if !generated {
+        if behind < 0.15 {
+            return Some((
+                Limit::Network,
+                format!("buffer running dry ({behind:.2} s), {:.0} of {bitrate:.0} kbit/s arriving", s.download_kbps),
+            ));
+        }
+        if bitrate > 0.0 && s.download_kbps > 0.0 && s.download_kbps < bitrate * 0.85 && behind < 0.8 {
+            return Some((Limit::Network, format!("{:.0} of {bitrate:.0} kbit/s arriving", s.download_kbps)));
+        }
+    }
+    if let Some(named) = named_fps(&status.current)
+        && named >= 50.0
+        && s.source_fps > 0.0
+        && s.source_fps < named * 0.75
+    {
+        return Some((Limit::Source, format!("the broadcast sends {:.0} fps on {}", s.source_fps, status.current)));
+    }
+    let gpu = match status.decode_on {
+        DecodeOn::Gpu => Some(rates.main_luid),
+        DecodeOn::Second(l) => Some(l),
+        DecodeOn::Cpu => None,
+    };
+    let load = gpu.and_then(|l| rates.gpu_load.get(&l).copied()).unwrap_or(0.0);
+    let decoded_short = s.decoded_fps > 0.0 && expected > 0.0 && s.decoded_fps < expected * 0.9;
+    if dec_drops > 0.2 || decoded_short {
+        let why = match status.decode_on {
+            DecodeOn::Cpu => "CPU decoding too slow".to_owned(),
+            _ => format!("{} decoder at {load:.0} %", status.decoder),
+        };
+        return Some((Limit::Decoder, format!("{why}: {:.0} of {expected:.0} fps decoded", s.decoded_fps)));
+    }
+    if matches!(status.decode_on, DecodeOn::Second(_)) {
+        let copy_ms = rates.tile_copy_ms.get(&id).copied().unwrap_or(0.0);
+        if (s.decoded_fps > 0.0 && shown < s.decoded_fps * 0.9) || copy_ms > 8.0 {
+            return Some((
+                Limit::Copy,
+                format!("{shown:.0} of {:.0} fps arrive, {copy_ms:.1} ms per frame", s.decoded_fps),
+            ));
+        }
+    }
+    if out_drops > 0.2 || (expected > 0.0 && shown < expected * 0.9) {
+        let why = if rates.render_busy_pct > 60.0 {
+            format!("render thread {:.0} % busy", rates.render_busy_pct)
+        } else {
+            "frames too late for the display".to_owned()
+        };
+        return Some((
+            Limit::Display,
+            format!("{shown:.0} of {expected:.0} fps shown, {out_drops:.1}/s dropped ({why})"),
+        ));
+    }
+    let note =
+        if load >= 90.0 { format!(", but the {} decoder is at {load:.0} %", status.decoder) } else { String::new() };
+    Some((Limit::None, format!("keeps up: {shown:.0} of {expected:.0} fps{note}")))
+}
+
 fn decoder_label(status: &Status, s: &StreamStats) -> (String, Color32) {
     use crate::stream::DecodeOn;
     if !matches!(status.state, State::Playing) || status.in_ad {
@@ -407,6 +565,29 @@ pub fn contents(ui: &mut egui::Ui, mut c: Ctx<'_>) {
         }
     });
     let streams: Vec<&TileRect> = c.rects.iter().filter(|t| matches!(t.kind, TileKind::Stream { .. })).collect();
+    // What holds the tab's streams back, counted.
+    let mut counts: Vec<(Limit, usize)> = Vec::new();
+    for t in &streams {
+        let TileKind::Stream { id, .. } = &t.kind else { continue };
+        let (Some(st), Some(s)) = (c.statuses.get(id), c.stats.get(id)) else { continue };
+        if let Some((limit, _)) = bottleneck(st, s, c.rates, *id) {
+            match counts.iter_mut().find(|(l, _)| *l == limit) {
+                Some(x) => x.1 += 1,
+                None => counts.push((limit, 1)),
+            }
+        }
+    }
+    counts.sort_by_key(|(l, _)| *l);
+    if !counts.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Holding streams back:").color(MUTED).size(12.0));
+            for (limit, n) in &counts {
+                let text =
+                    if *limit == Limit::None { format!("{n} keep up") } else { format!("{} {n}", limit.label()) };
+                ui.label(RichText::new(text).color(limit.color()).size(12.0).strong());
+            }
+        });
+    }
     let table = match c.state.view {
         View::Auto => streams.len() > 9,
         View::Layout => false,
@@ -525,53 +706,66 @@ fn stream_rows(ui: &mut egui::Ui, c: &mut Ctx<'_>, streams: &[&TileRect]) {
     if c.state.descending {
         rows.reverse();
     }
+    // Fixed shares of the window width: columns never jump when numbers
+    // change, and text that does not fit ends in "…" (full text on hover).
+    const SHARES: [f32; 10] = [0.035, 0.10, 0.065, 0.23, 0.085, 0.055, 0.07, 0.075, 0.115, 0.17];
+    const ROW_H: f32 = 20.0;
+    const PAD: f32 = 6.0;
+    let cell = |ui: &mut egui::Ui, w: f32, text: RichText, sense: egui::Sense| -> egui::Response {
+        ui.allocate_ui_with_layout(vec2(w, ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_min_size(vec2(w, ROW_H));
+            ui.add_space(PAD);
+            ui.add(egui::Label::new(text).truncate().sense(sense))
+        })
+        .inner
+    };
     egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-        egui::Grid::new("stats-rows").striped(true).num_columns(9).spacing(vec2(16.0, 4.0)).show(ui, |ui| {
-            let header = |ui: &mut egui::Ui, label: &str, by: SortBy| {
-                let on = c.state.sort == by;
+        let total = ui.available_width().max(900.0);
+        let w: Vec<f32> = SHARES.iter().map(|s| s * total).collect();
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        let mut clicked: Option<SortBy> = None;
+        ui.horizontal(|ui| {
+            let headers: [(&str, Option<SortBy>); 10] = [
+                ("#", Some(SortBy::Layout)),
+                ("Stream", Some(SortBy::Name)),
+                ("State", None),
+                ("Holding back", None),
+                ("Shown fps", Some(SortBy::Fps)),
+                ("Drops", Some(SortBy::Dropped)),
+                ("Buffered", Some(SortBy::Buffered)),
+                ("Network", Some(SortBy::Network)),
+                ("Stream · viewport", None),
+                ("Decoder", None),
+            ];
+            for (i, (label, by)) in headers.into_iter().enumerate() {
+                let on = by.is_some_and(|b| c.state.sort == b);
                 let arrow = if on { if c.state.descending { " ▾" } else { " ▴" } } else { "" };
-                // `c.state` is borrowed mutably below through a raw toggle.
-                let r = ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("{label}{arrow}")).color(if on { TEXT } else { MUTED }).strong(),
-                    )
-                    .sense(egui::Sense::click()),
-                );
-                r.clicked()
-            };
-            let mut clicked: Option<SortBy> = None;
-            for (label, by) in [("#", SortBy::Layout), ("Stream", SortBy::Name)] {
-                if header(ui, label, by) {
-                    clicked = Some(by);
+                let text = RichText::new(format!("{label}{arrow}")).color(if on { TEXT } else { MUTED }).strong();
+                let sense = if by.is_some() { egui::Sense::click() } else { egui::Sense::hover() };
+                if cell(ui, w[i], text, sense).clicked() {
+                    clicked = by;
                 }
             }
-            ui.label(RichText::new("State").color(MUTED).strong());
-            for (label, by) in [
-                ("Frames shown", SortBy::Fps),
-                ("Dropped", SortBy::Dropped),
-                ("Buffered", SortBy::Buffered),
-                ("Network", SortBy::Network),
-            ] {
-                if header(ui, label, by) {
-                    clicked = Some(by);
-                }
+        });
+        if let Some(by) = clicked {
+            if c.state.sort == by {
+                c.state.descending = !c.state.descending;
+            } else {
+                c.state.sort = by;
+                c.state.descending = matches!(by, SortBy::Dropped | SortBy::Buffered);
             }
-            ui.label(RichText::new("Stream · viewport").color(MUTED).strong());
-            ui.label(RichText::new("Decoder").color(MUTED).strong());
-            ui.end_row();
-            if let Some(by) = clicked {
-                if c.state.sort == by {
-                    c.state.descending = !c.state.descending;
-                } else {
-                    c.state.sort = by;
-                    c.state.descending = matches!(by, SortBy::Dropped | SortBy::Buffered);
-                }
+        }
+        let hover = egui::Sense::hover();
+        for (n, r) in rows.iter().enumerate() {
+            let st = &r.status;
+            let s = &r.s;
+            if n % 2 == 0 {
+                let top = ui.cursor().min;
+                ui.painter().rect_filled(Rect::from_min_size(top, vec2(total, ROW_H)), 0.0, PANEL);
             }
-            for r in &rows {
-                let st = &r.status;
-                let s = &r.s;
-                ui.label(RichText::new((r.order + 1).to_string()).color(MUTED));
-                ui.label(RichText::new(&r.name).color(TEXT).strong());
+            ui.horizontal(|ui| {
+                cell(ui, w[0], RichText::new((r.order + 1).to_string()).color(MUTED), hover);
+                cell(ui, w[1], RichText::new(&r.name).color(TEXT).strong(), hover).on_hover_text(&r.name);
                 let state = match &st.state {
                     _ if st.in_ad => RichText::new("ad break").color(WARN),
                     State::Playing => RichText::new("playing").color(GOOD),
@@ -579,7 +773,16 @@ fn stream_rows(ui: &mut egui::Ui, c: &mut Ctx<'_>, streams: &[&TileRect]) {
                     State::Offline => RichText::new("offline").color(MUTED),
                     State::Error(e) => RichText::new(e.clone()).color(BAD),
                 };
-                ui.label(state);
+                cell(ui, w[2], state, hover);
+                match bottleneck(st, s, c.rates, r.id) {
+                    Some((limit, detail)) => {
+                        let text = format!("{} · {detail}", limit.label());
+                        cell(ui, w[3], RichText::new(&text).color(limit.color()), hover).on_hover_text(text);
+                    }
+                    None => {
+                        cell(ui, w[3], RichText::new("—").color(MUTED), hover);
+                    }
+                }
                 let expected = s.source_fps * s.speed.max(0.5);
                 let fps_col = if s.source_fps <= 0.0 {
                     TEXT
@@ -588,9 +791,9 @@ fn stream_rows(ui: &mut egui::Ui, c: &mut Ctx<'_>, streams: &[&TileRect]) {
                 } else {
                     WARN
                 };
-                ui.label(RichText::new(format!("{:.1} / {:.0}", r.shown, s.source_fps)).color(fps_col));
+                cell(ui, w[4], RichText::new(format!("{:.1} / {:.0}", r.shown, s.source_fps)).color(fps_col), hover);
                 let drops = s.drops_vo + s.drops_decoder;
-                ui.label(RichText::new(drops.to_string()).color(if drops == 0 { GOOD } else { WARN }));
+                cell(ui, w[5], RichText::new(drops.to_string()).color(if drops == 0 { GOOD } else { WARN }), hover);
                 let behind = s.cache_s + s.pipe_s;
                 let speed = if s.speed > 1.001 {
                     " »"
@@ -599,20 +802,114 @@ fn stream_rows(ui: &mut egui::Ui, c: &mut Ctx<'_>, streams: &[&TileRect]) {
                 } else {
                     ""
                 };
-                ui.label(RichText::new(format!("{behind:.2} s{speed}")).color(if behind <= 1.2 {
+                let lat = if behind <= 1.2 {
                     GOOD
                 } else if behind <= 3.0 {
                     WARN
                 } else {
                     BAD
-                }));
-                ui.label(RichText::new(format!("{:.0} kbit/s", s.download_kbps)).color(TEXT));
+                };
+                cell(ui, w[6], RichText::new(format!("{behind:.2} s{speed}")).color(lat), hover);
+                cell(ui, w[7], RichText::new(format!("{:.0} kbit/s", s.download_kbps)).color(TEXT), hover);
                 let tile = c.rates.tiles.get(&r.id).copied().unwrap_or_default();
-                ui.label(RichText::new(format!("{} · {}×{}", st.current, tile.width, tile.height)).color(TEXT));
+                let res = format!("{} · {}×{}", st.current, tile.width, tile.height);
+                cell(ui, w[8], RichText::new(&res).color(TEXT), hover).on_hover_text(res);
                 let (dec, col) = decoder_label(st, s);
-                ui.label(RichText::new(dec).color(col));
-                ui.end_row();
-            }
-        });
+                cell(ui, w[9], RichText::new(&dec).color(col), hover).on_hover_text(dec);
+            });
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::DecodeOn;
+
+    const MAIN: (u32, i32) = (1, 0);
+    const IGPU: (u32, i32) = (2, 0);
+
+    fn playing(current: &str, on: DecodeOn) -> Status {
+        Status {
+            state: State::Playing,
+            current: current.into(),
+            decode_on: on,
+            decoder: "Radeon".into(),
+            ..Default::default()
+        }
+    }
+
+    fn stats(source: f64, decoded: f64) -> StreamStats {
+        StreamStats {
+            sampled: Some(Instant::now()),
+            source_fps: source,
+            decoded_fps: decoded,
+            speed: 1.0,
+            cache_s: 0.4,
+            video_kbps: 6000.0,
+            audio_kbps: 160.0,
+            download_kbps: 6500.0,
+            ..Default::default()
+        }
+    }
+
+    fn rates(shown: f64) -> Rates {
+        let mut r = Rates { main_luid: MAIN, ..Default::default() };
+        r.tiles.insert(7, TileStats { visible: true, ..Default::default() });
+        r.tile_fps.insert(7, shown);
+        r.gpu_load.insert(MAIN, 40.0);
+        r.gpu_load.insert(IGPU, 97.0);
+        r
+    }
+
+    fn limit(st: &Status, s: &StreamStats, r: &Rates) -> Limit {
+        bottleneck(st, s, r, 7).map(|(l, _)| l).unwrap_or(Limit::None)
+    }
+
+    #[test]
+    fn healthy_stream_keeps_up() {
+        assert_eq!(limit(&playing("1080p60", DecodeOn::Gpu), &stats(60.0, 60.0), &rates(59.5)), Limit::None);
+    }
+
+    #[test]
+    fn slow_download_is_the_network() {
+        let mut s = stats(60.0, 60.0);
+        s.download_kbps = 3000.0;
+        s.cache_s = 0.3;
+        assert_eq!(limit(&playing("1080p60", DecodeOn::Gpu), &s, &rates(60.0)), Limit::Network);
+        s.download_kbps = 6500.0;
+        s.cache_s = 0.05;
+        assert_eq!(limit(&playing("1080p60", DecodeOn::Gpu), &s, &rates(60.0)), Limit::Network);
+    }
+
+    #[test]
+    fn thirty_fps_on_a_p60_variant_is_the_source() {
+        assert_eq!(limit(&playing("1080p60", DecodeOn::Gpu), &stats(30.0, 30.0), &rates(30.0)), Limit::Source);
+    }
+
+    #[test]
+    fn decoder_behind_names_its_gpu() {
+        let st = playing("1080p60", DecodeOn::Second(IGPU));
+        let got = bottleneck(&st, &stats(60.0, 41.0), &rates(41.0), 7);
+        let (l, detail) = got.unwrap_or((Limit::None, String::new()));
+        assert_eq!(l, Limit::Decoder);
+        assert!(detail.contains("97 %"), "{detail}");
+    }
+
+    #[test]
+    fn frames_lost_after_decoding_on_another_gpu_are_the_copy() {
+        let st = playing("1080p60", DecodeOn::Second(IGPU));
+        assert_eq!(limit(&st, &stats(60.0, 60.0), &rates(45.0)), Limit::Copy);
+        // The same loss on the main GPU is the display.
+        assert_eq!(limit(&playing("1080p60", DecodeOn::Gpu), &stats(60.0, 60.0), &rates(45.0)), Limit::Display);
+    }
+
+    #[test]
+    fn hidden_or_not_playing_is_not_judged() {
+        let mut r = rates(0.0);
+        r.tiles.insert(7, TileStats { visible: false, ..Default::default() });
+        assert!(bottleneck(&playing("720p30", DecodeOn::Gpu), &stats(30.0, 30.0), &r, 7).is_none());
+        let st = Status { state: State::Starting, ..Default::default() };
+        assert!(bottleneck(&st, &stats(30.0, 30.0), &rates(30.0), 7).is_none());
+    }
 }

@@ -726,10 +726,13 @@ impl Renderer {
             stats.video_frames.fetch_add(1, Ordering::Relaxed);
             stats.copied_frames.fetch_add(1, Ordering::Relaxed);
             stats.copied_bytes.fetch_add(f.rgba.len() as u64, Ordering::Relaxed);
-            stats.copy_us.fetch_add(u64::from(f.readback_us) + t.elapsed().as_micros() as u64, Ordering::Relaxed);
+            let us = u64::from(f.readback_us) + t.elapsed().as_micros() as u64;
+            stats.copy_us.fetch_add(us, Ordering::Relaxed);
             if let Ok(mut t) = stats.tiles.lock() {
                 let e = t.entry(id).or_default();
                 e.frames += 1;
+                e.copied += 1;
+                e.copy_us += us;
                 (e.width, e.height) = size;
                 e.visible = visible;
             }
