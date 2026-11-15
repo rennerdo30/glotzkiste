@@ -13,6 +13,7 @@ gk-twitch = { path = "../gk-twitch" }
 serde_json.workspace = true
 gk-render = { path = "../gk-render" }
 gk-chat = { path = "../gk-chat" }
+gk-update = { path = "../gk-update" }
 egui.workspace = true
 egui-winit.workspace = true
 egui_tiles.workspace = true

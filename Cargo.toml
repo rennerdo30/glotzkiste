@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*"]
 # The icon tool only runs by hand (cargo run -p gk-icon).
-default-members = ["crates/gk-mpv", "crates/gk-twitch", "crates/gk-chat", "crates/gk-render", "crates/glotzkiste"]
+default-members = ["crates/gk-mpv", "crates/gk-twitch", "crates/gk-chat", "crates/gk-render", "crates/gk-update", "crates/glotzkiste"]
 
 [workspace.package]
 version = "0.1.0"

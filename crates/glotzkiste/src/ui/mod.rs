@@ -1,6 +1,7 @@
 //! Drawing: the top bar (tabs, add channel, layout, latency, account), the
 //! tile area and the login dialog. Runs only inside an egui pass.
 
+mod about;
 pub mod chat;
 pub mod stats;
 mod tiles;
@@ -74,6 +75,9 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, heigh
     if app.login.open {
         login_dialog(app, ui.ctx());
     }
+    if app.about_open {
+        about::window(app, ui.ctx());
+    }
     if app.stats_open || app.stats_on_tiles {
         // Numbers refresh twice a second while shown; closed, nothing ticks.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
@@ -124,6 +128,9 @@ fn shortcuts(app: &mut App, ui: &egui::Ui) {
         }
         if i.consume_key(egui::Modifiers::NONE, egui::Key::F3) {
             app.stats_open = !app.stats_open;
+        }
+        if i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::U) {
+            app.install_update();
         }
     });
 }
@@ -190,7 +197,17 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
 
         // Right side, laid out right to left.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add(egui::Button::new(RichText::new("⋯").size(16.0)).frame(false)).on_hover_text("About, updates, licences").clicked() {
+                app.about_open = !app.about_open;
+            }
             account_button(app, ui);
+            if let Some(c) = app.update.found.clone() {
+                let label = if app.update.installing { format!("Updating to {}…", c.version) } else { format!("⬆ Update to {}", c.version) };
+                let hint = if crate::update::installed() { "Downloads, checks and installs it, then restarts (Ctrl+Shift+U)" } else { "Opens the download page (this copy was not installed by the setup)" };
+                if ui.add_enabled(!app.update.installing, egui::Button::new(RichText::new(label).color(Color32::BLACK)).fill(GOOD)).on_hover_text(hint).clicked() {
+                    app.install_update();
+                }
+            }
             let stats_text = RichText::new("📊 Stats").color(if app.stats_open { TEXT } else { MUTED });
             if ui.add(egui::Button::new(stats_text).fill(if app.stats_open { RAISED } else { Color32::TRANSPARENT })).on_hover_text("Stream stats (F3)").clicked() {
                 app.stats_open = !app.stats_open;

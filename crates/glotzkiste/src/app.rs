@@ -29,6 +29,15 @@ pub enum UserEvent {
 type LibSlot = Arc<Mutex<Option<Result<Arc<gk_mpv::Libmpv>, String>>>>;
 type Slot<T> = Arc<Mutex<Option<T>>>;
 
+#[derive(Default)]
+pub struct UpdateState {
+    pub found: Option<gk_update::Candidate>,
+    pub checking: bool,
+    pub installing: bool,
+    /// The last result shown in the About window (ok?, text).
+    pub message: Option<(bool, String)>,
+}
+
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum LoginMode {
     #[default]
@@ -87,6 +96,12 @@ pub struct App {
     fonts_slot: Slot<egui::FontDefinitions>,
     pub(crate) renaming: Option<usize>,
     pub(crate) stats_open: bool,
+    pub(crate) about_open: bool,
+    pub(crate) update: UpdateState,
+    update_slot: Slot<(bool, Result<crate::update::Outcome, String>)>,
+    install_slot: Slot<Result<(), String>>,
+    quit: bool,
+    pub(crate) logo: Option<egui::TextureHandle>,
     pub(crate) stats_on_tiles: bool,
     pub(crate) sampler: crate::ui::stats::Sampler,
     pub(crate) tile_rects: Vec<crate::ui::stats::TileRect>,
@@ -263,6 +278,12 @@ impl App {
             fonts_slot,
             renaming: None,
             stats_open: false,
+            about_open: false,
+            update: UpdateState::default(),
+            update_slot: Arc::default(),
+            install_slot: Arc::default(),
+            quit: false,
+            logo: None,
             stats_on_tiles: false,
             sampler: Default::default(),
             tile_rects: Vec::new(),
@@ -402,6 +423,41 @@ impl App {
             }
             if let Ok(mut s) = slot.lock() {
                 *s = Some((r, None));
+            }
+            wake();
+        });
+    }
+
+    /// Looks for a newer release (daily on start, or `force` from About).
+    pub(crate) fn check_updates(&mut self, force: bool) {
+        if self.update.checking || self.options.smoke.is_some() {
+            return;
+        }
+        self.update.checking = true;
+        let (slot, wake) = (self.update_slot.clone(), self.wake());
+        crate::update::spawn_check(force, move |r| {
+            if let Ok(mut s) = slot.lock() {
+                *s = Some((force, r));
+            }
+            wake();
+        });
+    }
+
+    /// Installs the found update: download, verify, start the setup, close.
+    pub(crate) fn install_update(&mut self) {
+        let Some(c) = self.update.found.clone() else { return };
+        if self.update.installing {
+            return;
+        }
+        if !crate::update::installed() {
+            self.ctx.open_url(egui::OpenUrl::new_tab(crate::update::RELEASE_PAGE));
+            return;
+        }
+        self.update.installing = true;
+        let (slot, wake) = (self.install_slot.clone(), self.wake());
+        crate::update::spawn_install(c, move |r| {
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(r);
             }
             wake();
         });
@@ -547,6 +603,36 @@ impl App {
             self.ctx.set_fonts(defs);
             for ch in self.chat.channels.values_mut() {
                 ch.view.invalidate();
+            }
+        }
+        if let Some((force, r)) = self.update_slot.lock().ok().and_then(|mut s| s.take()) {
+            self.update.checking = false;
+            use crate::update::Outcome;
+            match r {
+                Ok(Outcome::Found(c)) => {
+                    self.update.message = Some((true, format!("Glotzkiste {} is available.", c.version)));
+                    self.update.found = Some(c);
+                }
+                Ok(Outcome::UpToDate) => self.update.message = force.then(|| (true, format!("Glotzkiste {} is the newest version.", env!("CARGO_PKG_VERSION")))),
+                Ok(Outcome::Off(why)) => self.update.message = Some((false, why)),
+                Ok(Outcome::Skipped) => {}
+                Err(e) => {
+                    log::warn!("update check: {e}");
+                    if force {
+                        self.update.message = Some((false, format!("The check failed: {e}")));
+                    }
+                }
+            }
+        }
+        if let Some(r) = self.install_slot.lock().ok().and_then(|mut s| s.take()) {
+            self.update.installing = false;
+            match r {
+                // The setup waits for us to close, installs and restarts us.
+                Ok(()) => self.quit = true,
+                Err(e) => {
+                    self.update.message = Some((false, e));
+                    self.about_open = true;
+                }
             }
         }
         if let Some(list) = self.browsers_slot.lock().ok().and_then(|mut s| s.take()) {
@@ -844,6 +930,8 @@ impl ApplicationHandler<UserEvent> for App {
             Err(e) => self.error = Some(format!("Video output failed: {e}")),
         }
         let state = egui_winit::State::new(self.ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(8192));
+        // Installed release builds look for updates once a day.
+        self.check_updates(false);
         // The UI never updates faster than the display can show.
         if let Some(mhz) = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).filter(|m| *m >= 24_000) {
             self.pass_interval = Duration::from_micros(1_000_000_000 / u64::from(mhz));
@@ -888,6 +976,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.quit {
+            event_loop.exit();
+            return;
+        }
         if self.smoke_until.is_some_and(|t| Instant::now() >= t) {
             self.finish_smoke(event_loop);
             return;

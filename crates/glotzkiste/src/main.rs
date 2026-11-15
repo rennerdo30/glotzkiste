@@ -11,6 +11,7 @@ mod libmpv;
 mod logger;
 mod stream;
 mod ui;
+mod update;
 mod workers;
 
 /// A random number from the OS-seeded hasher (ids that must not repeat).
