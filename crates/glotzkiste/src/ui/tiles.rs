@@ -7,7 +7,7 @@ use crate::app::App;
 use crate::chat_state::{BadgeMap, ChatState};
 use crate::images::Images;
 use crate::layout::{ChatMode, Pane, StreamPane, chat_channels};
-use crate::stream::{Cmd, Quality, State, Status, StreamHandle};
+use crate::stream::{Cmd, DecodeOn, Quality, State, Status, StreamHandle};
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, pos2, vec2};
 use egui_tiles::{TileId, UiResponse};
 use gk_render::VideoTile;
@@ -44,6 +44,8 @@ struct Behavior<'a> {
     chat_views: &'a mut HashMap<TileId, super::chat::ChatView>,
     /// The streams of the tab, in reading order (chat picker, combined chats).
     tab_streams: Vec<String>,
+    /// Where a stream can decode, in placement order.
+    decode_menu: Vec<(DecodeOn, String)>,
 }
 
 /// A demo channel's display name ("~aurora" -> "Aurora").
@@ -139,6 +141,24 @@ impl Behavior<'_> {
             self.acts.push(Act::Maximize(tile));
         } else if body.clicked() && !audible {
             self.acts.push(Act::Audio(p.channel.clone()));
+        }
+        // Right click: where the video is decoded.
+        if let Some(h) = handle {
+            let menu = &self.decode_menu;
+            body.context_menu(|ui| {
+                ui.label(RichText::new("Decode the video on").color(MUTED).size(11.0));
+                for (d, label) in menu {
+                    let hint = match d {
+                        DecodeOn::Gpu => "The GPU drawing the window: straight to the screen, no copies",
+                        DecodeOn::Second(_) => "Its own video decoder; each frame is copied over at tile size",
+                        DecodeOn::Cpu => "Software decoding, when every GPU decoder is full",
+                    };
+                    if ui.selectable_label(st.decode_on == *d, label.as_str()).on_hover_text(hint).clicked() {
+                        h.send(Cmd::Decoder(*d));
+                        ui.close();
+                    }
+                }
+            });
         }
 
         // The tile with the sound has an accent frame: visible at a glance.
@@ -500,6 +520,7 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
             tab.tree.tiles.get(*id).is_some() || app.tabs.iter().any(|t| t.tree.tiles.get(*id).is_some())
         });
     }
+    let decode_menu = app.placer.lock().map(|p| p.menu()).unwrap_or_default();
     let mut b = Behavior {
         streams: &app.streams,
         chat: &mut app.chat,
@@ -517,6 +538,7 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
         overlay: app.stats_on_tiles.then_some(&app.sampler.rates),
         chat_views: &mut app.chat_views,
         tab_streams,
+        decode_menu,
     };
     app.content_rect = ui.max_rect();
     let Some(tab) = app.tabs.get_mut(active) else { return };

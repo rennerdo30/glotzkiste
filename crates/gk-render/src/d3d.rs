@@ -1,6 +1,7 @@
 //! Device, waitable swap chain, stream surfaces and the render loop.
 
 use crate::egui_d3d::{EguiRenderer, create_texture};
+use crate::other_gpu::Aux;
 use crate::{ANIM_BIT, AnimFrames, DeviceInfo, Stats, UiFrame, VideoTile};
 use gk_mpv::{FrameKind, Mpv, RenderContext};
 use std::collections::HashMap;
@@ -25,10 +26,12 @@ struct Requests {
     deltas: egui::TexturesDelta,
     size: Option<(u32, u32)>,
     add: Vec<(u64, Mpv, Option<mpsc::Sender<()>>)>,
-    remove: Vec<u64>,
+    remove: Vec<(u64, Option<mpsc::Sender<()>>)>,
     anim_add: Vec<(u64, Arc<AnimFrames>)>,
     anim_remove: Vec<u64>,
     clear_color: Option<[f32; 4]>,
+    /// Hand the tile sizes to the second GPU again (a stream moved there).
+    resend_sizes: bool,
     snapshot: Option<(std::path::PathBuf, SnapshotReply)>,
     quit: bool,
 }
@@ -51,6 +54,7 @@ impl Requests {
             || !self.anim_add.is_empty()
             || !self.anim_remove.is_empty()
             || self.clear_color.is_some()
+            || self.resend_sizes
             || self.snapshot.is_some()
             || self.quit
     }
@@ -59,8 +63,11 @@ impl Requests {
 struct Shared {
     requests: Mutex<Requests>,
     wake: Condvar,
-    /// Set by any stream's mpv update callback.
+    /// Set by any stream's mpv update callback (and by another GPU's
+    /// thread when it finished a frame).
     video_dirty: AtomicBool,
+    /// The other GPUs' frames and tile sizes, once they run.
+    aux: Mutex<Vec<Arc<crate::other_gpu::Shared>>>,
 }
 
 impl Shared {
@@ -76,12 +83,22 @@ impl Shared {
     }
 }
 
-/// The handle the UI thread keeps. Every call returns at once.
+/// The handle the UI thread keeps. Every call returns at once, except the
+/// stream placement calls, which stream threads make.
 pub struct Presenter {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
     stats: Arc<Stats>,
+    luid: (u32, i32),
+    /// Render threads of other GPUs, started on first use.
+    aux: Mutex<HashMap<(u32, i32), Arc<Aux>>>,
+    /// Streams drawn by another GPU, and which.
+    placed: Mutex<HashMap<u64, (u32, i32)>>,
 }
+
+/// How long a stream thread waits for a render thread to take or release a
+/// stream (normally a few milliseconds).
+const PLACE_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl Presenter {
     /// Starts the render thread for `hwnd` and waits until its device and
@@ -91,6 +108,7 @@ impl Presenter {
             requests: Mutex::new(Requests::default()),
             wake: Condvar::new(),
             video_dirty: AtomicBool::new(false),
+            aux: Mutex::new(Vec::new()),
         });
         let stats = Arc::new(Stats::default());
         let (tx, rx) = mpsc::channel();
@@ -118,11 +136,25 @@ impl Presenter {
                 .map_err(|e| e.to_string())?
         };
         let info = rx.recv().map_err(|_| "the render thread stopped during start".to_owned())??;
-        Ok((Self { shared, thread: Some(thread), stats }, info))
+        let luid = info.luid;
+        let p = Self {
+            shared,
+            thread: Some(thread),
+            stats,
+            luid,
+            aux: Mutex::new(HashMap::new()),
+            placed: Mutex::new(HashMap::new()),
+        };
+        Ok((p, info))
     }
 
     pub fn stats(&self) -> Arc<Stats> {
         self.stats.clone()
+    }
+
+    /// The adapter of the GPU that draws the window.
+    pub fn luid(&self) -> (u32, i32) {
+        self.luid
     }
 
     pub fn resize(&self, w: u32, h: u32) {
@@ -155,7 +187,87 @@ impl Presenter {
     }
 
     pub fn remove_stream(&self, id: u64) {
-        self.shared.update(|r| r.remove.push(id));
+        let on = self.placed.lock().ok().and_then(|mut p| p.remove(&id));
+        if let Some(a) = on.and_then(|l| self.aux.lock().ok()?.get(&l).cloned()) {
+            a.remove(id, None);
+        }
+        self.shared.update(|r| r.remove.push((id, None)));
+    }
+
+    /// The render thread of the GPU with `luid`, started if needed.
+    fn aux_for(&self, luid: (u32, i32)) -> Result<Arc<Aux>, String> {
+        let mut map = self.aux.lock().map_err(|_| "GPU list poisoned")?;
+        if let Some(a) = map.get(&luid) {
+            return Ok(a.clone());
+        }
+        let shared = self.shared.clone();
+        let a = Arc::new(Aux::start(luid, Arc::new(move || shared.poke_video()))?);
+        if let Ok(mut v) = self.shared.aux.lock() {
+            v.push(a.shared.clone());
+        }
+        map.insert(luid, a.clone());
+        Ok(a)
+    }
+
+    fn attach_aux(&self, id: u64, mpv: &Mpv, luid: (u32, i32)) -> Result<(), String> {
+        let a = self.aux_for(luid)?;
+        let (tx, rx) = mpsc::channel();
+        a.add(id, mpv.clone(), tx);
+        rx.recv_timeout(PLACE_TIMEOUT).unwrap_or_else(|_| Err("that GPU did not answer".into()))?;
+        if let Ok(mut p) = self.placed.lock() {
+            p.insert(id, luid);
+        }
+        // That GPU needs the tile size now, not at the next UI change.
+        self.shared.update(|r| r.resend_sizes = true);
+        Ok(())
+    }
+
+    /// Creates a stream's render context (and so its video decoder) on the
+    /// GPU with `luid` (`None` or the main GPU's LUID: the main GPU, zero
+    /// copy). Another GPU renders the stream at tile size and its frames are
+    /// copied over. Falls back to the main GPU if that GPU fails. Blocks the
+    /// calling stream thread a few milliseconds; returns where the stream
+    /// went (`None`: the main GPU) and the error that sent it there.
+    pub fn place_stream(&self, id: u64, mpv: &Mpv, luid: Option<(u32, i32)>) -> (Option<(u32, i32)>, Option<String>) {
+        let mut err = None;
+        if let Some(l) = luid.filter(|l| *l != self.luid) {
+            match self.attach_aux(id, mpv, l) {
+                Ok(()) => return (Some(l), None),
+                Err(e) => err = Some(e),
+            }
+        }
+        let _ = self.add_stream_ready(id, mpv.clone()).recv_timeout(PLACE_TIMEOUT);
+        (None, err)
+    }
+
+    /// Moves a playing stream's render context to another GPU (see
+    /// `place_stream`). The player must reopen its file afterwards: the
+    /// video output starts over on the new device.
+    pub fn move_stream(&self, id: u64, mpv: &Mpv, luid: Option<(u32, i32)>) -> (Option<(u32, i32)>, Option<String>) {
+        let to = luid.filter(|l| *l != self.luid);
+        let from = self.placed.lock().ok().and_then(|p| p.get(&id).copied());
+        if from == to {
+            return (to, None);
+        }
+        // mpv has one render context at a time: free the current one first.
+        let (tx, rx) = mpsc::channel();
+        match from.and_then(|l| self.aux.lock().ok()?.get(&l).cloned()) {
+            Some(a) => {
+                if let Ok(mut p) = self.placed.lock() {
+                    p.remove(&id);
+                }
+                let (atx, arx) = mpsc::channel();
+                a.remove(id, Some(atx));
+                let _ = arx.recv_timeout(PLACE_TIMEOUT);
+                // The main render thread drops the uploaded frame texture.
+                self.shared.update(|r| r.remove.push((id, Some(tx))));
+            }
+            None => self.shared.update(|r| r.remove.push((id, Some(tx)))),
+        }
+        if rx.recv_timeout(PLACE_TIMEOUT).is_err() {
+            return (from, Some("the render thread did not release the stream".into()));
+        }
+        self.place_stream(id, mpv, to)
     }
 
     /// Registers an animated image as user texture `id` (must have `ANIM_BIT`).
@@ -182,6 +294,9 @@ impl Presenter {
 
 impl Drop for Presenter {
     fn drop(&mut self) {
+        if let Ok(mut a) = self.aux.lock() {
+            a.clear();
+        }
         self.shared.update(|r| r.quit = true);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -204,6 +319,13 @@ struct Surface {
     fresh: bool,
 }
 
+/// A stream drawn by the second GPU: its newest frame, uploaded.
+struct Remote {
+    tex: ID3D11Texture2D,
+    view: ID3D11ShaderResourceView,
+    size: (u32, u32),
+}
+
 /// Frames are drawn this long before their display time: the next present
 /// (at most one refresh later) then shows them on time.
 const HEADROOM_NS: i64 = 1_500_000;
@@ -211,7 +333,7 @@ const HEADROOM_NS: i64 = 1_500_000;
 const MAX_WAIT_NS: i64 = 1_000_000_000;
 
 /// Nanoseconds to wait before drawing a frame due at `due`.
-fn wait_ns(due: Option<i64>, now: i64) -> i64 {
+pub(crate) fn wait_ns(due: Option<i64>, now: i64) -> i64 {
     match due {
         Some(d) => {
             let w = d - HEADROOM_NS - now;
@@ -267,6 +389,7 @@ struct Renderer {
     egui: EguiRenderer,
     videos: Vec<VideoTile>,
     surfaces: HashMap<u64, Surface>,
+    remotes: HashMap<u64, Remote>,
     anims: HashMap<u64, Anim>,
     /// Animations drawn by the current UI and the frame each shows.
     visible_anims: Vec<(u64, usize)>,
@@ -357,6 +480,7 @@ impl Renderer {
                     egui,
                     videos: Vec::new(),
                     surfaces: HashMap::new(),
+                    remotes: HashMap::new(),
                     anims: HashMap::new(),
                     visible_anims: Vec::new(),
                     clear: [0.04, 0.04, 0.05, 1.0],
@@ -453,12 +577,19 @@ impl Renderer {
                 self.clear = c;
                 draw = true;
             }
-            for id in req.remove {
+            for (id, done) in req.remove {
                 self.surfaces.remove(&id);
+                self.remotes.remove(&id);
                 if let Ok(mut t) = stats.tiles.lock() {
                     t.remove(&id);
                 }
+                if let Some(tx) = done {
+                    let _ = tx.send(());
+                }
                 draw = true;
+            }
+            if req.resend_sizes {
+                self.send_aux_sizes();
             }
             for (id, mpv, ready) in req.add {
                 self.add_surface(id, &mpv);
@@ -495,6 +626,7 @@ impl Renderer {
                     log::error!("ui upload: {e}");
                 }
                 self.videos = ui.videos;
+                self.send_aux_sizes();
                 let now = self.now_ms();
                 self.visible_anims = self
                     .egui
@@ -510,6 +642,9 @@ impl Renderer {
             //    texture; frames due later wait for their time.
             let poked = shared.video_dirty.swap(false, Ordering::AcqRel);
             if self.render_streams(stats, poked) {
+                draw = true;
+            }
+            if poked && self.upload_remote(stats) {
                 draw = true;
             }
             // 4. Animations whose frame changed.
@@ -543,7 +678,68 @@ impl Renderer {
         }
     }
 
+    /// Tells the other GPUs the tile sizes (they render at tile size too).
+    fn send_aux_sizes(&self) {
+        let auxes = self.shared.aux.lock().map(|a| a.clone()).unwrap_or_default();
+        for aux in auxes {
+            if let Ok(mut sizes) = aux.sizes.lock() {
+                sizes.clear();
+                sizes.extend(self.videos.iter().map(|v| (v.id, v.size())));
+            }
+        }
+    }
+
+    /// Uploads the frames other GPUs finished. True if a visible one
+    /// changed.
+    fn upload_remote(&mut self, stats: &Stats) -> bool {
+        let auxes = self.shared.aux.lock().map(|a| a.clone()).unwrap_or_default();
+        let mut frames = Vec::new();
+        for aux in auxes {
+            if let Ok(mut f) = aux.frames.lock()
+                && !f.is_empty()
+            {
+                frames.extend(std::mem::take(&mut *f));
+            }
+        }
+        let mut changed = false;
+        for (id, f) in frames {
+            let t = Instant::now();
+            let size = (f.width, f.height);
+            if f.rgba.len() != (f.width * f.height * 4) as usize {
+                continue;
+            }
+            if self.remotes.get(&id).map(|r| r.size) != Some(size) {
+                match create_target(&self.device, size) {
+                    Ok((tex, view)) => {
+                        self.remotes.insert(id, Remote { tex, view, size });
+                    }
+                    Err(e) => {
+                        log::error!("second-GPU frame texture {size:?}: {e}");
+                        continue;
+                    }
+                }
+            }
+            let Some(r) = self.remotes.get(&id) else { continue };
+            // SAFETY: width x height RGBA8 rows into a texture of that size.
+            unsafe { self.context.UpdateSubresource(&r.tex, 0, None, f.rgba.as_ptr().cast(), f.width * 4, 0) };
+            let visible = self.videos.iter().any(|v| v.id == id);
+            stats.video_frames.fetch_add(1, Ordering::Relaxed);
+            stats.copied_frames.fetch_add(1, Ordering::Relaxed);
+            stats.copied_bytes.fetch_add(f.rgba.len() as u64, Ordering::Relaxed);
+            stats.copy_us.fetch_add(u64::from(f.readback_us) + t.elapsed().as_micros() as u64, Ordering::Relaxed);
+            if let Ok(mut t) = stats.tiles.lock() {
+                let e = t.entry(id).or_default();
+                e.frames += 1;
+                (e.width, e.height) = size;
+                e.visible = visible;
+            }
+            changed |= visible;
+        }
+        changed
+    }
+
     fn add_surface(&mut self, id: u64, mpv: &Mpv) {
+        self.remotes.remove(&id);
         // SAFETY: our device was created without SINGLETHREADED.
         match unsafe { RenderContext::new_d3d11(mpv, self.device.as_raw()) } {
             Ok(mut render) => {
@@ -676,11 +872,15 @@ impl Renderer {
             self.context.ClearRenderTargetView(&rtv, &self.clear);
             let now = self.now_ms();
             let surfaces = &self.surfaces;
+            let remotes = &self.remotes;
             let anims = &self.anims;
             let lookup = |u: u64| -> Option<ID3D11ShaderResourceView> {
                 if u & ANIM_BIT != 0 {
                     let a = anims.get(&u)?;
                     return Some(a.frames.get(a.index_at(now))?.0.clone());
+                }
+                if let Some(r) = remotes.get(&u) {
+                    return Some(r.view.clone());
                 }
                 let s = surfaces.get(&u)?;
                 if !s.has_frame {
@@ -723,6 +923,7 @@ fn merge(into: &mut Requests, more: Requests) {
     if more.clear_color.is_some() {
         into.clear_color = more.clear_color;
     }
+    into.resend_sizes |= more.resend_sizes;
     if more.snapshot.is_some() {
         into.snapshot = more.snapshot.take();
     }

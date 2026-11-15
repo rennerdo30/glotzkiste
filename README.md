@@ -21,10 +21,11 @@ For Windows. Free and open source.</p>
 
 - **Multiview in tabs.** Every tab is a free tile layout. Presets for grid, side by side, spotlight (one big, the rest beside it) and one-at-a-time, each with or without a chat column. Drag a tile by its top bar to move it, drag the gaps to resize, double-click to maximize.
 - **Ultra-low latency.** Glotzkiste fetches the stream itself and starts at the segment that is still being encoded, streaming it into the player as it arrives. *Ultra low*, *Low* and *Smooth* modes keep the delay steady by speeding up or easing off slightly; the tile shows how far behind you are.
-- **Built for speed.** Hardware decoding straight to the screen without copies, one render thread for every stream with each frame drawn at its due time, the interface redrawn only when something changes. Auto quality follows the tile size, keeps 60 fps where it can and steps down when the GPU's video decoder gets busy.
+- **Built for speed.** Hardware decoding straight to the screen without copies, one render thread for every stream with each frame drawn at its due time, the interface redrawn only when something changes. Auto quality follows the tile size, keeps 60 fps where it can and steps down when a video decoder gets busy.
+- **Every GPU you have.** Streams decode on your other GPUs first (an integrated one counts) and on the GPU that draws the window last, so the browser and games keep theirs. A decoder that runs full hands streams on to the next; right-click a stream to pick one yourself.
 - **Chat that keeps up.** 7TV, BetterTTV and FrankerFaceZ emotes (animated), badges, mentions and links. Switch a chat to any channel, or combine several channels, or every stream in the tab, into one chat.
 - **No ads with Turbo.** Log in with the session your browser already has; a guide in the app walks you through it. Without Turbo, ad breaks are skipped instead of shown.
-- **Stats** (F3) in their own window you can put on another screen: frames shown, drops, decoder, buffer and network per stream, laid out like your tiles or as a table, plus the GPU's video-decoder load.
+- **Stats** (F3) in their own window you can put on another screen: frames shown, drops, decoder, buffer and network per stream, laid out like your tiles or as a table, plus each GPU's video-decoder load and which GPU decodes each stream.
 - **Everything comes back.** Tabs, layouts, chats, quality, volume and the window place are saved and restored.
 - **Updates itself.** The installed version checks once a day and updates with one click.
 

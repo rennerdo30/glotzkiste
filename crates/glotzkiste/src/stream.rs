@@ -3,6 +3,7 @@
 //! expired tokens and offline phases, and reports a compact status to the UI
 //! only when something visible changed. The UI thread never waits for it.
 
+use crate::placement::Placer;
 use gk_mpv::{EndReason, Event, Format, Libmpv, Mpv, StreamReader, Value};
 use gk_render::Presenter;
 use gk_twitch::live::{FeedReader, LiveFeed};
@@ -57,8 +58,9 @@ pub enum DecodeOn {
     /// The GPU that draws the window, zero-copy (normal).
     #[default]
     Gpu,
-    /// A second, NVIDIA GPU (copied back; mpv can target only NVIDIA cards).
-    Nvidia,
+    /// A second GPU (by adapter LUID): its own video decoder and scaler;
+    /// each finished tile-sized frame is copied over to the main GPU.
+    Second((u32, i32)),
     /// The CPU (when the GPU's decoder is full).
     Cpu,
 }
@@ -66,9 +68,16 @@ pub enum DecodeOn {
 impl DecodeOn {
     fn hwdec(self) -> &'static str {
         match self {
-            DecodeOn::Gpu => "d3d11va",
-            DecodeOn::Nvidia => "nvdec-copy",
+            DecodeOn::Gpu | DecodeOn::Second(_) => "d3d11va",
             DecodeOn::Cpu => "no",
+        }
+    }
+
+    /// The GPU that draws (and so decodes) the video; `None`: the main one.
+    pub fn luid(self) -> Option<(u32, i32)> {
+        match self {
+            DecodeOn::Second(l) => Some(l),
+            _ => None,
         }
     }
 }
@@ -113,17 +122,14 @@ pub struct Status {
     pub low_latency: bool,
     pub hwdec: String,
     pub video_height: i64,
-    /// Moved off the main GPU's decoder because it was full.
-    pub offloaded: Option<DecodeOn>,
+    /// Where the video is decoded, and that GPU's short name.
+    pub decode_on: DecodeOn,
+    pub decoder: String,
 }
 
 /// True while the stats window is open: stream threads then sample mpv
 /// twice a second. Closed, the stats cost nothing.
 pub static STATS_ON: AtomicBool = AtomicBool::new(false);
-
-/// The GPU's video decoder is busy (set by the app from the GPU counters):
-/// Auto quality then sizes by tile height alone instead of keeping 60 fps.
-pub static DECODER_BUSY: AtomicBool = AtomicBool::new(false);
 
 /// Many tiles are visible: cheaper scaling (mpv's `fast` profile), which
 /// small tiles do not show.
@@ -171,6 +177,8 @@ pub struct Env {
     /// Wakes the UI (an event loop proxy send).
     pub notify: Arc<dyn Fn() + Send + Sync>,
     pub muted_by_flag: bool,
+    /// Which GPU decodes what (placement.rs).
+    pub placer: Arc<Mutex<Placer>>,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +220,10 @@ impl StreamHandle {
             posted: Status::default(),
             last_post: Instant::now() - Duration::from_secs(1),
             tile_height: 540,
+            visible: true,
+            decode_on: DecodeOn::Gpu,
+            reopen: false,
+            restore_vid: false,
         };
         let name = format!("gk-stream-{id}");
         let _ = std::thread::Builder::new().name(name).spawn(move || {
@@ -273,6 +285,14 @@ struct Control {
     /// The tile's height in pixels, kept across sessions (it may arrive
     /// before the stream is playing).
     tile_height: u32,
+    /// The tile is in the visible tab (video decoding on).
+    visible: bool,
+    decode_on: DecodeOn,
+    /// The video moved to another GPU: reopen at the next segment boundary
+    /// (the decoder starts over there).
+    reopen: bool,
+    /// Video was switched off for a move; on again with the next load.
+    restore_vid: bool,
 }
 
 const P_CACHE: u64 = 1;
@@ -402,9 +422,17 @@ impl Control {
                 return;
             }
         }
-        // mpv needs its render context before it loads anything.
-        let ready = self.env.presenter.add_stream_ready(self.id, mpv.clone());
-        let _ = ready.recv_timeout(Duration::from_secs(3));
+        // mpv needs its render context before it loads anything. It goes
+        // to the GPU whose decoder has room, the main GPU last.
+        let want = self.with_placer(|p| p.choose());
+        let (at, err) = self.env.presenter.place_stream(self.id, &mpv, want.luid());
+        if let Some(e) = err {
+            log::warn!("stream {}: {}: {e}; on the main GPU", self.channel, self.with_placer(|p| p.name(want)));
+            if let Some(l) = want.luid() {
+                self.with_placer(|p| p.mark_bad(l));
+            }
+        }
+        self.landed(at.map_or(DecodeOn::Gpu, DecodeOn::Second));
 
         if is_demo(&self.channel) {
             self.demo(&mpv);
@@ -482,6 +510,10 @@ impl Control {
             if self.stop.load(Ordering::Relaxed) {
                 return;
             }
+            if std::mem::take(&mut self.reopen) {
+                self.restore_video(mpv);
+                let _ = mpv.command(&["loadfile", demo_source(&self.channel)]);
+            }
             while let Some(ev) = mpv.wait_event(0.2) {
                 match ev {
                     Event::PropertyChange { id: P_HEIGHT, value: Value::Int64(h), .. } if h > 0 => {
@@ -538,13 +570,12 @@ impl Control {
                 let _ = mpv.command(&["set", "aid", if m { "no" } else { "auto" }]);
             }
             Cmd::Visible(v) => {
-                let _ = mpv.command(&["set", "vid", if v { "auto" } else { "no" }]);
+                self.visible = v;
+                if !self.restore_vid {
+                    let _ = mpv.command(&["set", "vid", if v { "auto" } else { "no" }]);
+                }
             }
-            Cmd::Decoder(d) => {
-                // mpv re-creates the decoder at the next frame.
-                let _ = mpv.command(&["set", "hwdec", d.hwdec()]);
-                self.set(|s| s.offloaded = (d != DecodeOn::Gpu).then_some(d));
-            }
+            Cmd::Decoder(d) => self.switch_decoder(mpv, d),
             Cmd::Latency(l) => self.settings.latency = l,
             Cmd::Quality(q) => self.settings.quality = q,
             Cmd::TileHeight(h) => self.tile_height = h,
@@ -552,13 +583,72 @@ impl Control {
         }
     }
 
+    /// Decodes on another GPU or the CPU. A move between GPUs takes the
+    /// video's render context along; the player reopens at the next segment
+    /// boundary, where the new decoder can start cleanly.
+    fn with_placer<T>(&self, f: impl FnOnce(&mut Placer) -> T) -> T {
+        let mut p = self.env.placer.lock().unwrap_or_else(|p| p.into_inner());
+        f(&mut p)
+    }
+
+    /// The decoder of this stream's GPU is busy: Auto quality sizes by tile
+    /// height alone (a 30 fps variant costs half).
+    fn busy(&self) -> bool {
+        self.with_placer(|p| p.busy(self.decode_on))
+    }
+
+    fn landed(&mut self, on: DecodeOn) {
+        self.decode_on = on;
+        let name = self.with_placer(|p| p.name(on));
+        log::info!("stream {}: video decoding on {name}", self.channel);
+        self.set(|s| {
+            s.decode_on = on;
+            s.decoder = name;
+        });
+    }
+
+    /// Decodes on another GPU or the CPU. A move between GPUs takes the
+    /// video's render context along; the player reopens at the next segment
+    /// boundary, where the new decoder can start cleanly.
+    fn switch_decoder(&mut self, mpv: &Mpv, d: DecodeOn) {
+        if d == self.decode_on {
+            return;
+        }
+        let mut on = d;
+        if d.luid() != self.decode_on.luid() {
+            // No video output while its render context moves.
+            let _ = mpv.command(&["set", "vid", "no"]);
+            let (at, err) = self.env.presenter.move_stream(self.id, mpv, d.luid());
+            if let Some(e) = err {
+                log::warn!("stream {}: cannot decode on {d:?}: {e}", self.channel);
+            }
+            if at == self.decode_on.luid() {
+                // Nothing moved.
+                let _ = mpv.command(&["set", "vid", if self.visible { "auto" } else { "no" }]);
+                return;
+            }
+            self.reopen = true;
+            self.restore_vid = true;
+            if d != DecodeOn::Cpu {
+                on = at.map_or(DecodeOn::Gpu, DecodeOn::Second);
+            }
+        }
+        let _ = mpv.command(&["set", "hwdec", on.hwdec()]);
+        self.landed(on);
+    }
+
+    /// Video on again (if visible) before a load, after a move.
+    fn restore_video(&mut self, mpv: &Mpv) {
+        if std::mem::take(&mut self.restore_vid) {
+            let _ = mpv.command(&["set", "vid", if self.visible { "auto" } else { "no" }]);
+        }
+    }
+
     fn pick(&self, variants: &[Variant], tile_height: u32) -> usize {
         match &self.settings.quality {
             Quality::Named(n) => variants.iter().position(|v| &v.name == n),
-            Quality::Auto => {
-                gk_twitch::playlist::pick(variants, tile_height.max(1), !DECODER_BUSY.load(Ordering::Relaxed))
-                    .and_then(|p| variants.iter().position(|v| v.name == p.name))
-            }
+            Quality::Auto => gk_twitch::playlist::pick(variants, tile_height.max(1), !self.busy())
+                .and_then(|p| variants.iter().position(|v| v.name == p.name)),
         }
         .unwrap_or(0)
     }
@@ -622,7 +712,7 @@ impl Control {
         let mut last_control = Instant::now();
         let mut refreshing_since: Option<Instant> = None;
         let mut last_sample: Option<(Instant, u64)> = None;
-        let mut busy = DECODER_BUSY.load(Ordering::Relaxed);
+        let mut busy = self.busy();
         // Test hook: GK_TEST_RESYNC_AT=<seconds> forces one live-edge resync.
         let mut test_resync = std::env::var("GK_TEST_RESYNC_AT")
             .ok()
@@ -651,6 +741,11 @@ impl Control {
             }
             if self.stop.load(Ordering::Relaxed) {
                 return Ok(Next::Stop);
+            }
+            // The video moved to another GPU: start over at the next segment
+            // boundary (a keyframe) so the new decoder starts cleanly.
+            if loaded_epoch.is_some() && std::mem::take(&mut self.reopen) {
+                feed.resync();
             }
             // Auto quality follows the tile once its size settled.
             if let Some((h, since)) = pending_height
@@ -702,6 +797,7 @@ impl Control {
                 && loaded_epoch != Some(st.epoch)
             {
                 let _ = mpv.command(&["set", "demuxer-lavf-format", fmt]);
+                self.restore_video(mpv);
                 if let Err(e) = mpv.command(&["loadfile", &format!("gkfeed://{}", self.id)]) {
                     self.set(|s| s.state = State::Error(e.to_string()));
                     return Err(Duration::from_secs(5));
@@ -766,7 +862,7 @@ impl Control {
                 }
                 // Decoder load changed: Auto quality may keep 60 fps again,
                 // or has to size by tile height alone.
-                let now_busy = DECODER_BUSY.load(Ordering::Relaxed);
+                let now_busy = self.busy();
                 if now_busy != busy {
                     busy = now_busy;
                     if self.settings.quality == Quality::Auto {

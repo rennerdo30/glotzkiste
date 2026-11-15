@@ -15,15 +15,9 @@ pub struct Gpu {
     pub decode_pct: f64,
 }
 
-impl Gpu {
-    pub fn is_nvidia(&self) -> bool {
-        self.vendor == 0x10DE
-    }
-}
-
 /// Hardware adapters (no software renderer), in DXGI order.
 #[cfg(windows)]
-fn adapters() -> Vec<Gpu> {
+pub fn adapters() -> Vec<Gpu> {
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIFactory1};
     let mut out = Vec::new();
     // SAFETY: COM calls with valid out values; adapters are released on drop.

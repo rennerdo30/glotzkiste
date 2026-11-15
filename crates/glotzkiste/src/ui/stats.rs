@@ -325,10 +325,10 @@ fn decoder_label(status: &Status, s: &StreamStats) -> (String, Color32) {
     if !matches!(status.state, State::Playing) || status.in_ad {
         return ("—".into(), MUTED);
     }
-    match status.offloaded {
-        Some(DecodeOn::Nvidia) => ("NVIDIA GPU (moved: main decoder full)".into(), WARN),
-        Some(DecodeOn::Cpu) => ("CPU (moved: GPU decoder full)".into(), WARN),
-        _ if s.hwdec.contains("d3d11") => ("GPU · zero-copy".into(), GOOD),
+    match status.decode_on {
+        DecodeOn::Cpu => ("CPU (GPU decoders full)".into(), WARN),
+        DecodeOn::Second(_) if s.hwdec.contains("d3d11") => (format!("{} · copied", status.decoder), GOOD),
+        DecodeOn::Gpu if s.hwdec.contains("d3d11") => (format!("{} · zero-copy", status.decoder), GOOD),
         _ if s.hwdec.is_empty() || s.hwdec == "no" => ("software".into(), WARN),
         _ => (s.hwdec.clone(), TEXT),
     }

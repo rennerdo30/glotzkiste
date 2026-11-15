@@ -10,6 +10,7 @@ mod images;
 mod layout;
 mod libmpv;
 mod logger;
+mod placement;
 mod stream;
 mod ui;
 mod update;

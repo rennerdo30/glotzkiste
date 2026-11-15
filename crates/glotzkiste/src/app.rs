@@ -71,11 +71,20 @@ struct StatsWindow {
 }
 
 /// Moves streams off a full GPU video decoder.
+#[derive(Default)]
 struct Valve {
-    hot: u32,
-    drops: i64,
+    /// Samples in a row with the decoder at 90 % or more, per GPU.
+    hot: HashMap<(u32, i32), u32>,
+    /// Dropped frames of the streams on each GPU at the last sample.
+    drops: HashMap<(u32, i32), i64>,
     last_move: Option<Instant>,
-    checked: Instant,
+    last_cpu: Option<Instant>,
+    checked: Option<Instant>,
+    /// Samples in a row a stream on another GPU decoded in software.
+    no_hw: HashMap<u64, u32>,
+    /// Test hook (`GK_TEST_MOVE=<seconds>`): then the first playing stream
+    /// moves to the next GPU.
+    test_at: Option<Instant>,
 }
 
 pub struct App {
@@ -133,6 +142,8 @@ pub struct App {
     stats_ui: crate::ui::stats::Ui,
     font_defs: Option<egui::FontDefinitions>,
     valve: Valve,
+    /// Which GPU decodes which stream (placement.rs).
+    pub(crate) placer: Arc<Mutex<crate::placement::Placer>>,
     pub(crate) error: Option<String>,
     saved_json: String,
     save_check: Instant,
@@ -345,7 +356,15 @@ impl App {
             stats_win: None,
             stats_ui: Default::default(),
             font_defs: None,
-            valve: Valve { hot: 0, drops: 0, last_move: None, checked: Instant::now() },
+            placer: Arc::new(Mutex::new(crate::placement::Placer::default())),
+            valve: Valve {
+                checked: Some(Instant::now()),
+                test_at: std::env::var("GK_TEST_MOVE")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .map(|s| Instant::now() + Duration::from_secs_f64(s.max(0.0))),
+                ..Default::default()
+            },
             error: None,
             saved_json: String::new(),
             save_check: Instant::now(),
@@ -401,6 +420,7 @@ impl App {
                                 presenter: presenter.clone(),
                                 notify: wake_fn(&self.proxy),
                                 muted_by_flag: self.options.mute,
+                                placer: self.placer.clone(),
                             };
                             let audible = active && audio.as_deref() == Some(p.channel.as_str());
                             let settings = Settings {
@@ -618,54 +638,122 @@ impl App {
         }
     }
 
-    /// When the GPU's video decoder stays full and frames drop, the newest
-    /// stream on it moves to a second NVIDIA GPU, else to the CPU.
+    /// Every 2 s: gives the placer the decoders' load, and when a GPU's
+    /// decoder stays full while its streams drop frames, moves the newest
+    /// stream there to the next GPU with room (the main GPU last), else to
+    /// the CPU.
     fn run_valve(&mut self) {
-        if self.valve.checked.elapsed() < Duration::from_secs(2) {
+        use crate::stream::{DecodeOn, State, Status};
+        if self.valve.checked.is_some_and(|c| c.elapsed() < Duration::from_secs(2)) {
             return;
         }
-        self.valve.checked = Instant::now();
+        self.valve.checked = Some(Instant::now());
         let gpus = self.gpus.lock().map(|g| g.clone()).unwrap_or_default();
         let visible = self.visible.values().filter(|v| **v).count();
         crate::stream::MANY_TILES.store(visible > 4, std::sync::atomic::Ordering::Relaxed);
-        let Some(mine) = gpus.iter().find(|g| g.luid == self.render_luid) else { return };
-        // Busy above 85 %, free again below 60 % (no flapping).
-        let busy = crate::stream::DECODER_BUSY.load(std::sync::atomic::Ordering::Relaxed);
-        if !busy && mine.decode_pct >= 85.0 {
-            log::warn!("video decoder at {:.0} %: Auto quality sizes by tile height now", mine.decode_pct);
-            crate::stream::DECODER_BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
-        } else if busy && mine.decode_pct < 60.0 {
-            crate::stream::DECODER_BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
-        }
-        self.valve.hot = if mine.decode_pct >= 90.0 { self.valve.hot + 1 } else { 0 };
-        let on_gpu: Vec<(u64, crate::stream::Status)> = self
+        let main = self.render_luid;
+        let gpu_of = |d: DecodeOn| match d {
+            DecodeOn::Gpu => Some(main),
+            DecodeOn::Second(l) => Some(l),
+            DecodeOn::Cpu => None,
+        };
+        // Visible, playing streams (hidden ones decode no video).
+        let mut playing: Vec<(u64, Status)> = self
             .streams
             .iter()
             .filter(|(id, _)| self.visible.get(id) == Some(&true))
             .map(|(id, s)| (*id, s.status()))
-            .filter(|(_, st)| st.offloaded.is_none() && matches!(st.state, crate::stream::State::Playing))
+            .filter(|(_, st)| matches!(st.state, State::Playing) && !st.in_ad)
             .collect();
-        let drops: i64 = on_gpu.iter().map(|(_, st)| st.drops).sum();
-        let dropping = drops > self.valve.drops;
-        self.valve.drops = drops;
-        if self.valve.hot < 3
-            || !dropping
-            || self.valve.last_move.is_some_and(|t| t.elapsed() < Duration::from_secs(10))
+        playing.sort_by_key(|(id, _)| *id);
+        let mut streams_on: HashMap<(u32, i32), u32> = HashMap::new();
+        for (_, st) in &playing {
+            if let Some(l) = gpu_of(st.decode_on) {
+                *streams_on.entry(l).or_default() += 1;
+            }
+        }
+        let placer = self.placer.clone();
+        let mut placer = placer.lock().unwrap_or_else(|p| p.into_inner());
+        placer.update(gpus.clone(), streams_on);
+
+        // Software decoding on another GPU gains nothing: that GPU has no
+        // hardware decoder for these streams. Back to the main GPU.
+        for (id, st) in &playing {
+            let demo = self.streams.get(id).is_some_and(|s| crate::stream::is_demo(&s.channel));
+            match st.decode_on {
+                DecodeOn::Second(l) if !demo && st.video_height > 0 && (st.hwdec.is_empty() || st.hwdec == "no") => {
+                    let n = self.valve.no_hw.entry(*id).or_default();
+                    *n += 1;
+                    if *n >= 2 {
+                        self.valve.no_hw.remove(id);
+                        placer.mark_bad(l);
+                        self.streams[id].send(Cmd::Decoder(DecodeOn::Gpu));
+                    }
+                }
+                _ => {
+                    self.valve.no_hw.remove(id);
+                }
+            }
+        }
+
+        // Test hook (GK_TEST_MOVE=<seconds>): the first playing stream moves
+        // to the next GPU in placement order.
+        if let Some(at) = self.valve.test_at
+            && Instant::now() >= at
+            && let Some((id, st)) = playing.first()
         {
-            return;
+            self.valve.test_at = None;
+            let gpus_menu: Vec<DecodeOn> =
+                placer.menu().into_iter().map(|(d, _)| d).filter(|d| *d != DecodeOn::Cpu).collect();
+            let i = gpus_menu.iter().position(|d| *d == st.decode_on).map_or(0, |i| i + 1);
+            match gpus_menu.get(i % gpus_menu.len().max(1)).copied().filter(|d| *d != st.decode_on) {
+                Some(to) => {
+                    log::warn!("test: stream {id} moves from {} to {}", placer.name(st.decode_on), placer.name(to));
+                    self.streams[id].send(Cmd::Decoder(to));
+                }
+                None => log::warn!("test: only one GPU"),
+            }
         }
-        let Some((id, _)) = on_gpu.iter().max_by_key(|(id, _)| *id) else { return };
-        let target = if gpus.iter().any(|g| g.is_nvidia() && g.luid != self.render_luid) {
-            crate::stream::DecodeOn::Nvidia
-        } else {
-            crate::stream::DecodeOn::Cpu
-        };
-        log::warn!("video decoder at {:.0} % with dropped frames: stream {id} moves to {target:?}", mine.decode_pct);
-        if let Some(s) = self.streams.get(id) {
-            s.send(Cmd::Decoder(target));
+
+        for g in &gpus {
+            let h = self.valve.hot.entry(g.luid).or_default();
+            *h = if g.decode_pct >= 90.0 { *h + 1 } else { 0 };
         }
-        self.valve.last_move = Some(Instant::now());
-        self.valve.hot = 0;
+        let mut drops: HashMap<(u32, i32), i64> = HashMap::new();
+        for (_, st) in &playing {
+            if let Some(l) = gpu_of(st.decode_on) {
+                *drops.entry(l).or_default() += st.drops;
+            }
+        }
+        let cooling = self.valve.last_move.is_some_and(|t| t.elapsed() < Duration::from_secs(4));
+        let mut moved = cooling;
+        for g in &gpus {
+            let now = drops.get(&g.luid).copied().unwrap_or(0);
+            let before = self.valve.drops.insert(g.luid, now).unwrap_or(now);
+            if moved || self.valve.hot.get(&g.luid).copied().unwrap_or(0) < 2 || now <= before {
+                continue;
+            }
+            let Some((id, _)) = playing.iter().rev().find(|(_, st)| gpu_of(st.decode_on) == Some(g.luid)) else {
+                continue;
+            };
+            let target = placer.choose_except(Some(g.luid)).unwrap_or(DecodeOn::Cpu);
+            if target == DecodeOn::Cpu && self.valve.last_cpu.is_some_and(|t| t.elapsed() < Duration::from_secs(10)) {
+                continue;
+            }
+            log::warn!(
+                "{}: video decoder at {:.0} % with dropped frames: stream {id} moves to {}",
+                g.name,
+                g.decode_pct,
+                placer.name(target)
+            );
+            self.streams[id].send(Cmd::Decoder(target));
+            self.valve.last_move = Some(Instant::now());
+            if target == DecodeOn::Cpu {
+                self.valve.last_cpu = Some(Instant::now());
+            }
+            self.valve.hot.insert(g.luid, 0);
+            moved = true;
+        }
     }
 
     /// Looks for a newer release (daily on start, or `force` from About).
@@ -1098,6 +1186,15 @@ impl App {
             ld(&st.busy_us) / 1000,
             ld(&st.slow_waits)
         );
+        if ld(&st.copied_frames) > 0 {
+            println!(
+                "copies: frames={} MB={:.1} ms_total={:.1} us_per_frame={:.0}",
+                ld(&st.copied_frames),
+                ld(&st.copied_bytes) as f64 / 1e6,
+                ld(&st.copy_us) as f64 / 1000.0,
+                ld(&st.copy_us) as f64 / ld(&st.copied_frames) as f64
+            );
+        }
         let tiles = st.tiles.lock().map(|t| t.clone()).unwrap_or_default();
         let mut ids: Vec<&u64> = self.streams.keys().collect();
         ids.sort();
@@ -1118,7 +1215,7 @@ impl App {
             let s = &self.streams[id];
             let st = s.status();
             println!(
-                "stream {id} {}: state={:?} variant={} buffer={:.1}s drops={} hwdec={} height={} turbo={} ads_expected={} low_latency={} in_ad={}",
+                "stream {id} {}: state={:?} variant={} buffer={:.1}s drops={} hwdec={} height={} turbo={} ads_expected={} low_latency={} in_ad={} decoder={}",
                 s.channel,
                 st.state,
                 st.current,
@@ -1129,18 +1226,13 @@ impl App {
                 st.turbo,
                 st.ads_expected,
                 st.low_latency,
-                st.in_ad
+                st.in_ad,
+                st.decoder
             );
         }
         println!("{}", self.describe_state());
         for g in self.gpus.lock().map(|g| g.clone()).unwrap_or_default() {
-            println!(
-                "gpu: {} decode={:.2}% render={} nvidia={}",
-                g.name,
-                g.decode_pct,
-                g.luid == self.render_luid,
-                g.is_nvidia()
-            );
+            println!("gpu: {} decode={:.2}% render={}", g.name, g.decode_pct, g.luid == self.render_luid);
         }
         for (name, ch) in &self.chat.channels {
             println!("chat {name}: lines={} room_id={} emotes={}", ch.buffer.len(), ch.room_id, ch.emotes.len());
@@ -1219,6 +1311,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.adapter =
                     if info.software { format!("{} (software)", info.adapter) } else { info.adapter.clone() };
                 self.render_luid = info.luid;
+                if let Ok(mut pl) = self.placer.lock() {
+                    *pl = crate::placement::Placer::new(info.luid, crate::gpu::adapters());
+                }
                 p.set_clear_color(crate::ui::BG_LINEAR);
                 self.presenter = Some(Arc::new(p));
             }
@@ -1342,7 +1437,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // The valve looks at the decoder every 2 s while streams play.
         if !self.streams.is_empty() {
-            let t = self.valve.checked + Duration::from_secs(2);
+            let t = self.valve.checked.unwrap_or_else(Instant::now) + Duration::from_secs(2);
             next = Some(next.map_or(t, |n| n.min(t)));
         }
         // A pending save wakes the loop once, even when nothing else moves.

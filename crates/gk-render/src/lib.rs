@@ -7,10 +7,11 @@
 //! replays the last UI with fresh texture contents. At most one present per
 //! display refresh (waitable swap chain, frame latency 1).
 
-#[cfg(windows)]
 mod d3d;
 #[cfg(windows)]
 mod egui_d3d;
+#[cfg(windows)]
+mod other_gpu;
 
 use std::sync::atomic::AtomicU64;
 
@@ -57,6 +58,11 @@ pub struct Stats {
     pub busy_us: AtomicU64,
     /// Presents that waited longer than 50 ms on the swap chain.
     pub slow_waits: AtomicU64,
+    /// Frames of streams on other GPUs copied over, their bytes and the
+    /// time spent (readback there plus upload here), in microseconds.
+    pub copied_frames: AtomicU64,
+    pub copied_bytes: AtomicU64,
+    pub copy_us: AtomicU64,
     /// Per stream: frames drawn into its tile and the tile texture size.
     pub tiles: std::sync::Mutex<std::collections::HashMap<u64, TileStats>>,
 }
