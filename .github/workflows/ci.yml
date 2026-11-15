@@ -45,10 +45,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Release build with the pinned libmpv inside
+      - name: Release build
         shell: pwsh
         run: |
-          $env:GK_LIBMPV = ./scripts/fetch-libmpv.ps1 -Destination "$env:RUNNER_TEMP/libmpv"
           cargo build --release --locked -p glotzkiste
           if ($LASTEXITCODE) { throw 'build failed' }
       - name: Package (pinned NSIS 3.13) and test install, reinstall, uninstall

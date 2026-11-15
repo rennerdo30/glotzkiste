@@ -37,7 +37,7 @@ function Value([string]$Path, [string]$Name) {
 
 function Assert-Installed {
     if (!(Test-Path -LiteralPath $exe)) { throw "glotzkiste.exe missing in $dir" }
-    foreach ($f in 'LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'libmpv-NOTICE.txt', 'LGPL-2.1.txt', 'uninstall.exe') {
+    foreach ($f in 'libmpv-2.dll', 'LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'libmpv-NOTICE.txt', 'LGPL-2.1.txt', 'uninstall.exe') {
         if (!(Test-Path -LiteralPath (Join-Path $dir $f))) { throw "$f missing" }
     }
     if ((Value $key 'DisplayVersion') -ne $Version) { throw "DisplayVersion is '$(Value $key 'DisplayVersion')', expected $Version" }
@@ -45,7 +45,7 @@ function Assert-Installed {
     # Release builds are GUI-subsystem; redirected stdout still carries the output.
     $code, $line = Query '--version'
     if ($code -ne 0 -or $line -ne "glotzkiste $Version") { throw "glotzkiste --version printed '$line' ($code)" }
-    # The embedded libmpv unpacks, loads and has the client API Glotzkiste needs.
+    # The libmpv next to it loads and has the client API Glotzkiste needs.
     $code, $line = Query '--mpv-info'
     if ($code -ne 0) { throw "glotzkiste --mpv-info failed ($code): $line" }
     Write-Host "   $line"

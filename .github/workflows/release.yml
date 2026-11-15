@@ -49,10 +49,9 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-about@0.9.3
-      - name: Release build with the pinned libmpv inside
+      - name: Release build
         shell: pwsh
         run: |
-          $env:GK_LIBMPV = ./scripts/fetch-libmpv.ps1 -Destination "$env:RUNNER_TEMP/libmpv"
           cargo build --release --locked -p glotzkiste
           if ($LASTEXITCODE) { throw 'build failed' }
       - name: Package (pinned NSIS 3.13)
@@ -105,7 +104,7 @@ jobs:
           awk -v v="$version" '$0 ~ "^## "v"[[:space:]]*$" {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md || true
           {
             echo
-            echo "**Install:** run the setup (per user, no admin rights), or unpack the zip and start glotzkiste.exe (one file, nothing else needed). Windows 10 and 11, x64 with AVX2."
+            echo "**Install:** run the setup (per user, no admin rights), or unpack the zip anywhere and start glotzkiste.exe (no install needed). Windows 10 and 11, x64 with AVX2."
             echo "Installed copies find updates themselves (one click, or Ctrl+Shift+U); every download is checked against SHA256SUMS.txt."
           } >> notes.md
           flags=(--draft --verify-tag --title "Glotzkiste $RELEASE_TAG" --notes-file notes.md)

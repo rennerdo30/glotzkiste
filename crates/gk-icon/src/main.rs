@@ -25,7 +25,14 @@ fn main() {
             pixmap.save_png(root.join("assets/logo/glotzkiste-256.png")).expect("png");
         }
         let image = ico::IconImage::from_rgba_data(size, size, rgba);
-        dir.add_entry(ico::IconDirEntry::encode(&image).expect("encode"));
+        // Classic bitmaps up to 128 px, PNG only for 256 px: some tools (the
+        // NSIS setup's icon replacement among them) take no PNG entries.
+        let entry = if size >= 256 {
+            ico::IconDirEntry::encode_as_png(&image)
+        } else {
+            ico::IconDirEntry::encode_as_bmp(&image)
+        };
+        dir.add_entry(entry.expect("encode"));
     }
     let out = root.join("assets/logo/glotzkiste.ico");
     let file = std::fs::File::create(&out).expect("create ico");

@@ -1,8 +1,8 @@
-//! Embeds libmpv (zstd-compressed) so Glotzkiste ships as one executable.
-//! `GK_LIBMPV` names the DLL (set in `.cargo/config.toml`); without it the
-//! build embeds nothing and the app looks for libmpv next to itself.
+//! Embeds the exe icon. For development builds, `GK_LIBMPV` (set in the
+//! local `.cargo/config.toml`) names the pinned libmpv-2.dll, which is copied
+//! next to the built executable so `cargo run` plays. Packages ship the DLL
+//! themselves (scripts/package.ps1).
 
-use std::io::Write;
 use std::path::PathBuf;
 
 fn main() {
@@ -16,33 +16,21 @@ fn main() {
         println!("cargo:warning=exe icon not embedded: {e}");
     }
     println!("cargo:rerun-if-env-changed=GK_LIBMPV");
-    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-    let dest = out.join("libmpv.zst");
-    let meta = out.join("libmpv.meta");
-    let Some(src) = std::env::var_os("GK_LIBMPV").map(PathBuf::from).filter(|p| p.is_file()) else {
-        std::fs::write(&dest, b"").expect("write empty");
-        std::fs::write(&meta, b"0 0").expect("write meta");
-        println!("cargo:warning=GK_LIBMPV not set: libmpv is not embedded");
+    let Some(src) = std::env::var_os("GK_LIBMPV").map(PathBuf::from).filter(|p| p.is_file()) else { return };
+    println!("cargo:rerun-if-changed={}", src.display());
+    // OUT_DIR is <target>/<profile>/build/<crate>[-/]<hash>/out: the
+    // profile folder is the parent of `build`.
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap_or_default());
+    let Some(bin) = out.ancestors().find(|a| a.file_name().is_some_and(|n| n == "build")).and_then(|b| b.parent())
+    else {
         return;
     };
-    println!("cargo:rerun-if-changed={}", src.display());
-    let raw = std::fs::read(&src).expect("read libmpv");
-    // FNV-1a of the DLL names the extracted file, so a changed DLL never
-    // reuses an old extraction.
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in &raw {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x0100_0000_01b3);
+    let dest = bin.join("libmpv-2.dll");
+    let same = |a: &std::path::Path, b: &std::path::Path| matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(x), Ok(y)) if x.len() == y.len());
+    if !same(&src, &dest)
+        && let Err(e) = std::fs::copy(&src, &dest)
+    {
+        // A running copy of the app keeps the DLL locked; the old one stays.
+        println!("cargo:warning=libmpv not copied to {}: {e}", dest.display());
     }
-    let stamp = format!("{h:016x} {}", raw.len());
-    // Reuse the compressed file when the DLL did not change.
-    if std::fs::read_to_string(&meta).ok().as_deref() == Some(stamp.as_str()) && dest.is_file() {
-        return;
-    }
-    let mut enc = zstd::stream::Encoder::new(Vec::new(), 12).expect("zstd");
-    let _ = enc.multithread(4);
-    enc.write_all(&raw).expect("compress");
-    let packed = enc.finish().expect("finish");
-    std::fs::write(&dest, packed).expect("write libmpv.zst");
-    std::fs::write(&meta, stamp).expect("write meta");
 }

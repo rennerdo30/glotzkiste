@@ -3,7 +3,7 @@
 //! Glotzkiste links no mpv code at build time. The player finds the shared
 //! library when it starts, so:
 //! - the workspace builds and tests on any machine without mpv headers;
-//! - libmpv (LGPL) stays a separate, replaceable file embedded in the executable and extracted once;
+//! - libmpv (LGPL) stays a separate, replaceable file next to the executable;
 //! - a missing or too old libmpv is a message in the window, never a crash
 //!   (AGENTS.md performance rule 8).
 //!

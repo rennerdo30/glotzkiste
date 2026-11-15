@@ -7,7 +7,7 @@ jobs = 8
 
 [env]
 SCCACHE_DIR = { value = "E:/sccache", force = true }
-# libmpv embedded into the executable (zstd-compressed at build time).
+# The pinned libmpv, copied next to development builds by build.rs.
 GK_LIBMPV = { value = "E:/Development/_cache/tools/libmpv/2026-11-13-fe753a7824/extracted/libmpv-2.dll", force = false }
 
 [target.x86_64-pc-windows-msvc]

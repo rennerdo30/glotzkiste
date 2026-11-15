@@ -1,6 +1,6 @@
 ; Glotzkiste per-user Windows setup (NSIS 3). Built by scripts/package.ps1:
 ;   makensis /DVERSION=1.0.0 /DVI_VERSION=1.0.0.0 /DSRC=<dir> /DOUTFILE=<file> installer\glotzkiste.nsi
-; SRC holds glotzkiste.exe (libmpv embedded), LICENSE.txt,
+; SRC holds glotzkiste.exe, libmpv-2.dll, LICENSE.txt,
 ; THIRD-PARTY-NOTICES.txt, libmpv-NOTICE.txt and LGPL-2.1.txt.
 ;
 ; Installs to %LOCALAPPDATA%\Programs\Glotzkiste without admin rights, with a
@@ -46,6 +46,8 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "FileDescription" "Glotzkiste ${VERSION} setup"
 VIAddVersionKey "LegalCopyright" "MIT License"
 
+Icon "..\assets\logo\glotzkiste.ico"
+UninstallIcon "..\assets\logo\glotzkiste.ico"
 !define MUI_ICON "..\assets\logo\glotzkiste.ico"
 !define MUI_UNICON "..\assets\logo\glotzkiste.ico"
 !define MUI_ABORTWARNING
@@ -117,6 +119,7 @@ Section "Glotzkiste"
   Call WaitForApp
   SetOutPath "$INSTDIR"
   File "${SRC}\glotzkiste.exe"
+  File "${SRC}\libmpv-2.dll"
   File "${SRC}\LICENSE.txt"
   File "${SRC}\THIRD-PARTY-NOTICES.txt"
   File "${SRC}\libmpv-NOTICE.txt"
@@ -145,6 +148,7 @@ SectionEnd
 Section "Uninstall"
   Call un.WaitForApp
   Delete "$INSTDIR\glotzkiste.exe"
+  Delete "$INSTDIR\libmpv-2.dll"
   Delete "$INSTDIR\LICENSE.txt"
   Delete "$INSTDIR\THIRD-PARTY-NOTICES.txt"
   Delete "$INSTDIR\libmpv-NOTICE.txt"

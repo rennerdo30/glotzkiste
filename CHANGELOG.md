@@ -13,4 +13,4 @@ The first release.
 - **No ads with Turbo:** log in with your browser session, guided step by step (open-source cookie exporter or the browser's developer tools); the login is kept in Windows Credential Manager. Without Turbo, ad breaks are skipped instead of shown.
 - **Stats** (F3): its own window, laid out like your tiles or as a sortable table: frames shown, drops, decoder, buffer, network, and the GPU video-decoder load. If the decoder runs full and frames drop, streams move to a second NVIDIA GPU or the CPU.
 - **Everything comes back:** tabs, layouts, chats, quality, volume and the window place are saved and restored.
-- **One file:** `glotzkiste.exe` carries everything it needs; the setup adds a Start menu entry and in-app updates.
+- **Setup or portable:** a per-user setup (no admin rights) with a Start menu entry and in-app updates, or a zip to unpack anywhere.

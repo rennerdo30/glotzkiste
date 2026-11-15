@@ -1,6 +1,6 @@
 # Glotzkiste design
 
-A multi-stream live viewer: tabs, each tab a free tile layout of stream and chat panes, third-party emotes, ad-free playback through the viewer's own account. Windows x64, one executable. Speed is P0 (`AGENTS.md`).
+A multi-stream live viewer: tabs, each tab a free tile layout of stream and chat panes, third-party emotes, ad-free playback through the viewer's own account. Windows x64: a per-user setup or a portable zip, `glotzkiste.exe` with `libmpv-2.dll` beside it. Speed is P0 (`AGENTS.md`).
 
 ## 1. Threads and data flow
 
@@ -24,7 +24,7 @@ A multi-stream live viewer: tabs, each tab a free tile layout of stream and chat
 Public APIs below are the contracts between crates.
 
 ### `gk-mpv` (from Nitrate, done)
-libmpv loaded at runtime, `Mpv` client handle, `RenderContext::new_d3d11`, `render_d3d11(texture)`, update callback. `Libmpv::load_from(&[path])` loads the extracted embedded DLL.
+libmpv loaded at runtime, `Mpv` client handle, `RenderContext::new_d3d11`, `render_d3d11(texture)`, update callback. `Libmpv::load_from(&[path])` loads `libmpv-2.dll` from next to the executable.
 
 ### `gk-twitch` (blocking, no UI deps; called from workers)
 - `auth`: `parse_cookies_txt(&str) -> Option<String>` (Netscape `cookies.txt`, the `auth-token` cookie of `twitch.tv`/`.twitch.tv`; also accept a raw token pasted alone or a JSON cookie export), `Auth { token, login, user_id }` with a `Debug` that hides the token, `validate(&Http, token) -> Result<Auth>`, `store::{save, load, clear}` (DPAPI, `%APPDATA%\Glotzkiste\auth.bin`).
@@ -51,7 +51,7 @@ libmpv loaded at runtime, `Mpv` client handle, `RenderContext::new_d3d11`, `rend
 - Stream textures are sized to the tile's physical pixels and recreated on change; mpv draws aspect-fit with black bars.
 
 ### `glotzkiste` (the binary)
-- Extracts the embedded libmpv once, creates the window, the presenter and the egui context, owns the model:
+- Loads libmpv from next to the executable, creates the window, the presenter and the egui context, owns the model:
   - `Tab { title, tree: egui_tiles::Tree<Pane> }`, `Pane::Stream { channel, quality: Auto | Fixed(name), volume, muted }`, `Pane::Chat { channel }`, `Pane::Empty`.
   - Layout presets (one stream; stream + chat; 2 side by side; 2×2; 2×2 + chat; 1 large + 3 small); tiles are dragged, split and resized freely (egui_tiles), layouts are saved (`%APPDATA%\Glotzkiste\layout.json`).
 - Stream manager: per stream an mpv handle (`vo=libmpv`, `hwdec=d3d11va`, muted unless it holds the audio focus), state (resolving, playing, offline, error), automatic variant choice by tile height, refresh of the playback token on error.

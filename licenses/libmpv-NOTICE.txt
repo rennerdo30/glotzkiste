@@ -1,15 +1,12 @@
 libmpv in Glotzkiste
 
-Glotzkiste uses libmpv, loaded at runtime as a separate library. It is not
-part of Glotzkiste's own code. To keep Glotzkiste a single file, a compressed
-copy of libmpv-2.dll is stored inside glotzkiste.exe and written to
-%LOCALAPPDATA%\Glotzkiste\libmpv-<hash>.dll on first start, then loaded from
-there.
+Glotzkiste uses libmpv, loaded at runtime as a separate library: the file
+libmpv-2.dll next to glotzkiste.exe. It is not part of Glotzkiste's own code.
 
 Replacing it
-  Put any compatible libmpv-2.dll (client API 2.x with the Direct3D 11 render
-  API, x86-64) next to glotzkiste.exe. Glotzkiste then loads that file instead
-  of its own copy.
+  Replace libmpv-2.dll next to glotzkiste.exe with any compatible build
+  (client API 2.x with the Direct3D 11 render API, x86-64). Glotzkiste loads
+  whatever file is there.
 
 What it is
   mpv, commit fe753a7824 (2026-11-13), built as libmpv with its LGPL

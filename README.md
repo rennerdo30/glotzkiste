@@ -5,7 +5,7 @@
 <h1 align="center">Glotzkiste</h1>
 
 <p align="center"><b>Many live streams and chats at once. Fast, close to live, no ads with Turbo.</b><br>
-One Windows executable. Free and open source.</p>
+For Windows. Free and open source.</p>
 
 <p align="center">
   <a href="https://github.com/rennerdo30/glotzkiste/releases/latest">Download</a> ·
@@ -37,7 +37,7 @@ One Windows executable. Free and open source.</p>
 Download from the [latest release](https://github.com/rennerdo30/glotzkiste/releases/latest):
 
 - **Setup** (`glotzkiste-<version>-setup.exe`): installs for your Windows user only, no admin rights. Adds a Start menu entry (and a desktop shortcut if you like) and keeps itself up to date.
-- **Portable** (`glotzkiste-<version>-windows-x64.zip`): unpack anywhere and start `glotzkiste.exe`. It is one file and needs nothing else.
+- **Portable** (`glotzkiste-<version>-windows-x64.zip`): unpack anywhere and start `glotzkiste.exe`. Nothing to install; keep `libmpv-2.dll` next to it.
 
 Windows 10 or 11, 64-bit, a CPU with AVX2 (most from 2015 on) and a GPU with Direct3D 11. The setup is not code-signed yet, so Windows may warn on first run: *More info*, then *Run anyway*. Every release lists the SHA-256 of its files in `SHA256SUMS.txt`.
 
@@ -72,10 +72,10 @@ Twitch itself adds its usual one to two seconds between the broadcaster and its 
 
 ## Building
 
-Rust (the version in `rust-toolchain.toml`) on Windows. `scripts\package.ps1` builds the release exe with the pinned libmpv inside and makes the setup, zip and checksums; see [`docs/RELEASING.md`](docs/RELEASING.md) and the architecture in [`docs/DESIGN.md`](docs/DESIGN.md).
+Rust (the version in `rust-toolchain.toml`) on Windows. `scripts\package.ps1` builds the release exe and makes the setup, zip and checksums with the pinned libmpv; see [`docs/RELEASING.md`](docs/RELEASING.md) and the architecture in [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Licence
 
-Glotzkiste is released under the [MIT licence](LICENSE). It contains libmpv and FFmpeg (LGPL 2.1 or later), loaded at runtime and replaceable: put your own `libmpv-2.dll` next to `glotzkiste.exe` and it is used instead. Details and the source offer are in [`licenses/libmpv-NOTICE.txt`](licenses/libmpv-NOTICE.txt); the Rust crates it uses are listed in `THIRD-PARTY-NOTICES.txt` in every release.
+Glotzkiste is released under the [MIT licence](LICENSE). It uses libmpv and FFmpeg (LGPL 2.1 or later) as the separate `libmpv-2.dll` next to `glotzkiste.exe`, which you may replace with your own build. Details and the source offer are in [`licenses/libmpv-NOTICE.txt`](licenses/libmpv-NOTICE.txt); the Rust crates it uses are listed in `THIRD-PARTY-NOTICES.txt` in every release.
 
 Glotzkiste is an independent project. It is not affiliated with or endorsed by Twitch, 7TV, BetterTTV or FrankerFaceZ; their names refer only to the services it connects to.

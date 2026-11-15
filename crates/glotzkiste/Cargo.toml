@@ -20,12 +20,10 @@ egui_tiles.workspace = true
 winit.workspace = true
 serde.workspace = true
 log.workspace = true
-zstd = { version = "0.14.4", default-features = false }
 rfd = { version = "0.18.0", default-features = false }
 
 [build-dependencies]
 embed-resource = "3.0.12"
-zstd = { version = "0.14.4", default-features = false, features = ["zstdmt"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Performance", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }

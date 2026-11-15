@@ -4,8 +4,8 @@
 #
 #   scripts\package.ps1 [-MakeNsis <makensis.exe>] [-BinDir <folder with glotzkiste.exe>]
 #
-# glotzkiste.exe carries libmpv inside (build.rs, GK_LIBMPV); this script
-# fetches the pinned libmpv and sets GK_LIBMPV for the build when it builds.
+# The packages hold glotzkiste.exe and the pinned libmpv-2.dll next to it
+# (scripts/fetch-libmpv.ps1, checksum-verified).
 # NSIS 3.13 (zlib licence, a build tool, not shipped): scripts/fetch-nsis.ps1
 # downloads the pinned portable ZIP. THIRD-PARTY-NOTICES.txt comes from
 # cargo-about when it is installed (CI); otherwise a local test notice is written.
@@ -54,22 +54,22 @@ function Invoke-Bounded([string]$File, [string[]]$Arguments, [int]$Seconds) {
 
 $cargo = (Get-Command cargo -ErrorAction Stop).Source
 if (!$BinDir) {
-    # The pinned libmpv goes inside the exe; the variable lives only in this process.
-    if (!$env:GK_LIBMPV) { $env:GK_LIBMPV = & (Join-Path $PSScriptRoot 'fetch-libmpv.ps1') -Destination $LibMpvCache }
     Invoke-Bounded $cargo @('build', '--release', '--locked', '-j', '8', '-p', 'glotzkiste') 3600 | Out-Null
     $meta = & $cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
     $BinDir = Join-Path $meta.target_directory 'release'
 }
 $exe = Join-Path $BinDir 'glotzkiste.exe'
 if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Missing glotzkiste.exe in $BinDir" }
-# A package without libmpv inside would not play anything.
-if ((Get-Item -LiteralPath $exe).Length -lt 20MB) { throw "$exe is too small to contain libmpv: was GK_LIBMPV set for the build?" }
+# The pinned libmpv, never whatever DLL happens to sit in the build folder.
+$libmpv = & (Join-Path $PSScriptRoot 'fetch-libmpv.ps1') -Destination $LibMpvCache
+if (!$libmpv -or !(Test-Path -LiteralPath $libmpv -PathType Leaf)) { throw 'fetch-libmpv.ps1 returned no libmpv-2.dll' }
 
 $out = Join-Path $root 'artifacts/installer'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $stage = Join-Path $out ('stage-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item -LiteralPath $exe -Destination $stage
+Copy-Item -LiteralPath $libmpv -Destination (Join-Path $stage 'libmpv-2.dll')
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination (Join-Path $stage 'LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $root 'licenses/libmpv-NOTICE.txt') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'licenses/LGPL-2.1.txt') -Destination $stage

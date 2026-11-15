@@ -16,7 +16,7 @@ One version for the whole workspace: `version` under `[workspace.package]` in `C
    ```
 3. **The release workflow runs** ([`.github/workflows/release.yml`](../.github/workflows/release.yml)):
    - checks that the tag matches the workspace version;
-   - builds `glotzkiste.exe` with the pinned libmpv inside (`scripts/fetch-libmpv.ps1`, checksum-verified; `GK_LIBMPV` for `build.rs`), static C runtime;
+   - builds `glotzkiste.exe` (static C runtime) and puts the pinned `libmpv-2.dll` (`scripts/fetch-libmpv.ps1`, checksum-verified) next to it in both packages;
    - packages `glotzkiste-<version>-setup.exe` (per-user NSIS 3.13 setup) and `glotzkiste-<version>-windows-x64.zip`, each with `LICENSE.txt`, `THIRD-PARTY-NOTICES.txt` (cargo-about), `libmpv-NOTICE.txt` and `LGPL-2.1.txt`;
    - runs the installer lifecycle test on the disposable runner (install, reinstall, locked exe, uninstall keeps the user's layout);
    - writes `SHA256SUMS.txt` over both packages and creates a **draft** release with the changelog section as notes. Rerunning it with the same tag refreshes a draft and never touches a published release.
