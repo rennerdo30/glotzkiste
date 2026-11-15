@@ -23,6 +23,8 @@ enum Act {
     Send(String, String),
     Login,
     Add(String),
+    /// Decode a stream there (chosen by hand: the app keeps it there).
+    DecodeOn(u64, DecodeOn),
 }
 
 struct Behavior<'a> {
@@ -143,8 +145,10 @@ impl Behavior<'_> {
             self.acts.push(Act::Audio(p.channel.clone()));
         }
         // Right click: where the video is decoded.
-        if let Some(h) = handle {
+        if handle.is_some() {
             let menu = &self.decode_menu;
+            let acts = &mut self.acts;
+            let id = p.id;
             body.context_menu(|ui| {
                 ui.label(RichText::new("Decode the video on").color(MUTED).size(11.0));
                 for (d, label) in menu {
@@ -154,7 +158,7 @@ impl Behavior<'_> {
                         DecodeOn::Cpu => "Software decoding, when every GPU decoder is full",
                     };
                     if ui.selectable_label(st.decode_on == *d, label.as_str()).on_hover_text(hint).clicked() {
-                        h.send(Cmd::Decoder(*d));
+                        acts.push(Act::DecodeOn(id, *d));
                         ui.close();
                     }
                 }
@@ -593,6 +597,13 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
                 if let Some(tab) = app.tabs.get_mut(active) {
                     tab.audio = Some(c);
                 }
+            }
+            Act::DecodeOn(id, d) => {
+                if let Some(h) = app.streams.get(&id) {
+                    h.send(Cmd::Decoder(d));
+                }
+                // Placed by hand: the balancing leaves it there.
+                app.pinned.insert(id);
             }
             Act::MuteAll => {
                 if let Some(tab) = app.tabs.get_mut(active) {

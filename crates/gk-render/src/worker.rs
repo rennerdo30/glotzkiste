@@ -49,6 +49,8 @@ pub(crate) struct Frame {
     pub rgba: Vec<u8>,
     /// Microseconds spent reading it back.
     pub readback_us: u32,
+    /// The same picture drawn again (mpv asked for a redraw).
+    pub redraw: bool,
 }
 
 /// New shared textures of a stream (legacy shared handles; they need no
@@ -66,6 +68,8 @@ pub(crate) struct Published {
     pub generation: u64,
     pub index: usize,
     pub value: u64,
+    /// The same picture drawn again (mpv asked for a redraw).
+    pub redraw: bool,
 }
 
 type Reply = mpsc::Sender<Result<(), String>>;
@@ -99,6 +103,9 @@ pub(crate) struct Shared {
     /// Shared: this worker's fence as an NT handle, taken (and closed) by
     /// the main thread.
     pub fence: Mutex<Option<usize>>,
+    /// Repeats per stream since the main thread last took them (mpv asked
+    /// for a render that showed nothing new; not handed over).
+    pub repeats: Mutex<HashMap<u64, u64>>,
 }
 
 impl Shared {
@@ -143,6 +150,7 @@ impl Worker {
             published: Mutex::new(HashMap::new()),
             released: Mutex::new(HashMap::new()),
             fence: Mutex::new(None),
+            repeats: Mutex::new(HashMap::new()),
         });
         let (tx, rx) = mpsc::channel();
         let s = shared.clone();
@@ -282,6 +290,8 @@ struct ReadbackTarget {
     /// Copies issued and not read yet, oldest first (staging index).
     inflight: VecDeque<usize>,
     next: usize,
+    /// The newest copy is a redraw of the same picture.
+    redraw: bool,
 }
 
 /// A stream's shared textures on the main GPU.
@@ -342,7 +352,7 @@ fn readback_target(device: &ID3D11Device, size: (u32, u32)) -> windows::core::Re
     desc.BindFlags = 0;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
     let staging = [texture(device, &desc)?, texture(device, &desc)?];
-    Ok(ReadbackTarget { tex, staging, size, inflight: VecDeque::new(), next: 0 })
+    Ok(ReadbackTarget { tex, staging, size, inflight: VecDeque::new(), next: 0, redraw: false })
 }
 
 fn ring_target(device: &ID3D11Device, size: (u32, u32), generation: u64) -> windows::core::Result<(RingTarget, Ring)> {
@@ -485,7 +495,7 @@ fn run(
             if let Some((rgba, readback_us)) = newest
                 && let Ok(mut f) = shared.frames.lock()
             {
-                f.insert(*id, Frame { width: t.size.0, height: t.size.1, rgba, readback_us });
+                f.insert(*id, Frame { width: t.size.0, height: t.size.1, rgba, readback_us, redraw: t.redraw });
                 any = true;
             }
         }
@@ -548,6 +558,9 @@ fn run(
                     }
                     s.render.report_swap();
                     if s.pending_kind == FrameKind::Repeat {
+                        if let Ok(mut r) = shared.repeats.lock() {
+                            *r.entry(*id).or_default() += 1;
+                        }
                         continue;
                     }
                     f.value += 1;
@@ -557,7 +570,8 @@ fn run(
                         context.Flush();
                     }
                     if let Ok(mut p) = shared.published.lock() {
-                        p.insert(*id, Published { generation: t.generation, index: i, value: f.value });
+                        let redraw = s.pending_kind == FrameKind::Redraw;
+                        p.insert(*id, Published { generation: t.generation, index: i, value: f.value, redraw });
                     }
                     t.next = (i + 1) % RING;
                     any = true;
@@ -570,8 +584,12 @@ fn run(
                     }
                     s.render.report_swap();
                     if s.pending_kind == FrameKind::Repeat {
+                        if let Ok(mut r) = shared.repeats.lock() {
+                            *r.entry(*id).or_default() += 1;
+                        }
                         continue;
                     }
+                    t.redraw = s.pending_kind == FrameKind::Redraw;
                     // An unread older copy in this slot is superseded.
                     let i = t.next;
                     t.inflight.retain(|j| *j != i);

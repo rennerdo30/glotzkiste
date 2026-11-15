@@ -144,6 +144,8 @@ pub struct App {
     valve: Valve,
     /// Which GPU decodes which stream (placement.rs).
     pub(crate) placer: Arc<Mutex<crate::placement::Placer>>,
+    /// Streams whose GPU the viewer chose by hand: never moved automatically.
+    pub(crate) pinned: std::collections::HashSet<u64>,
     pub(crate) error: Option<String>,
     saved_json: String,
     save_check: Instant,
@@ -357,6 +359,7 @@ impl App {
             stats_ui: Default::default(),
             font_defs: None,
             placer: Arc::new(Mutex::new(crate::placement::Placer::default())),
+            pinned: Default::default(),
             valve: Valve {
                 checked: Some(Instant::now()),
                 test_at: std::env::var("GK_TEST_MOVE")
@@ -554,7 +557,8 @@ impl App {
             return;
         };
         let size = window.inner_size();
-        let presenter = match Presenter::start(h.hwnd.get(), (size.width, size.height)) {
+        // The stats window shows no streams: no render workers.
+        let presenter = match Presenter::start_with(h.hwnd.get(), (size.width, size.height), false) {
             Ok((p, _)) => p,
             Err(e) => {
                 log::error!("stats window: {e}");
@@ -681,6 +685,7 @@ impl App {
             .filter(|(_, st)| matches!(st.state, State::Playing) && !st.in_ad)
             .collect();
         playing.sort_by_key(|(id, _)| *id);
+        self.pinned.retain(|id| self.streams.contains_key(id));
         let mut streams_on: HashMap<(u32, i32), u32> = HashMap::new();
         for (_, st) in &playing {
             if let Some(l) = gpu_of(st.decode_on) {
@@ -748,7 +753,9 @@ impl App {
             if moved || self.valve.hot.get(&g.luid).copied().unwrap_or(0) < 2 || now <= before {
                 continue;
             }
-            let Some((id, _)) = playing.iter().rev().find(|(_, st)| gpu_of(st.decode_on) == Some(g.luid)) else {
+            let Some((id, _)) =
+                playing.iter().rev().find(|(id, st)| gpu_of(st.decode_on) == Some(g.luid) && !self.pinned.contains(id))
+            else {
                 continue;
             };
             let target = placer.choose_except(Some(g.luid)).unwrap_or(DecodeOn::Cpu);
@@ -768,6 +775,39 @@ impl App {
             }
             self.valve.hot.insert(g.luid, 0);
             moved = true;
+        }
+
+        // Balancing (GK-2): streams go back toward the preferred GPUs. One
+        // stream at a time (a move costs it about two seconds of picture):
+        // from the CPU to any GPU with room, else from a GPU whose decoder is
+        // at 60 % or more to an earlier GPU in order (the main GPU last)
+        // with room. Streams placed by hand stay.
+        let settled = self.valve.last_move.is_none_or(|t| t.elapsed() >= Duration::from_secs(6));
+        if moved || !settled {
+            return;
+        }
+        let load = |l: (u32, i32)| gpus.iter().find(|g| g.luid == l).map_or(0.0, |g| g.decode_pct);
+        let mut candidates: Vec<&(u64, Status)> = playing.iter().filter(|(id, _)| !self.pinned.contains(id)).collect();
+        // Worst placed first (CPU, then the main GPU, ...), newest first.
+        candidates.sort_by_key(|(id, st)| (std::cmp::Reverse(placer.rank(st.decode_on)), std::cmp::Reverse(*id)));
+        for (id, st) in candidates {
+            let target = match st.decode_on {
+                DecodeOn::Cpu => placer.choose_except(None),
+                d => match gpu_of(d) {
+                    Some(l) if load(l) >= 60.0 => placer.earlier_with_room(l),
+                    _ => None,
+                },
+            };
+            let Some(to) = target else { continue };
+            log::info!(
+                "balancing: stream {id} moves from {} ({:.0} %) to {}",
+                placer.name(st.decode_on),
+                gpu_of(st.decode_on).map_or(100.0, load),
+                placer.name(to)
+            );
+            self.streams[id].send(Cmd::Decoder(to));
+            self.valve.last_move = Some(Instant::now());
+            break;
         }
     }
 

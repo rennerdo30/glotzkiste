@@ -127,6 +127,13 @@ impl Presenter {
     /// Starts the render thread for `hwnd` and waits until its device and
     /// swap chain exist (or failed), then the render workers.
     pub fn start(hwnd: isize, size: (u32, u32)) -> Result<(Self, DeviceInfo), String> {
+        Self::start_with(hwnd, size, true)
+    }
+
+    /// Like `start`; `workers` false for a window without streams (the
+    /// stats window), which needs no render workers.
+    pub fn start_with(hwnd: isize, size: (u32, u32), workers: bool) -> Result<(Self, DeviceInfo), String> {
+        let want_workers = workers;
         let shared = Arc::new(Shared {
             requests: Mutex::new(Requests::default()),
             wake: Condvar::new(),
@@ -161,7 +168,7 @@ impl Presenter {
         let (info, main_fence) = rx.recv().map_err(|_| "the render thread stopped during start".to_owned())??;
         let luid = info.luid;
         let mut workers = Vec::new();
-        if let Some(h) = main_fence.filter(|_| !info.software) {
+        if let Some(h) = main_fence.filter(|_| want_workers && !info.software) {
             for _ in 0..worker_count() {
                 let poke = shared.clone();
                 match Worker::start(luid, Delivery::Shared { main_fence: h }, Arc::new(move || poke.poke_video())) {
@@ -178,7 +185,9 @@ impl Presenter {
                 }
             }
         }
-        log::info!("{} render workers on the main GPU", workers.len());
+        if want_workers {
+            log::info!("{} render workers on the main GPU", workers.len());
+        }
         let p = Self {
             shared,
             thread: Some(thread),
@@ -869,13 +878,27 @@ impl Renderer {
                 }
                 l.ready = Some((p.index, p.value));
                 let visible = self.videos.iter().any(|v| v.id == id);
-                stats.video_frames.fetch_add(1, Ordering::Relaxed);
+                if !p.redraw {
+                    stats.video_frames.fetch_add(1, Ordering::Relaxed);
+                }
                 if let Ok(mut t) = stats.tiles.lock() {
                     let e = t.entry(id).or_default();
-                    e.frames += 1;
+                    if p.redraw {
+                        e.redraws += 1;
+                    } else {
+                        e.frames += 1;
+                    }
                     e.visible = visible;
                 }
                 changed |= visible;
+            }
+            let repeats = w.repeats.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default();
+            if !repeats.is_empty()
+                && let Ok(mut t) = stats.tiles.lock()
+            {
+                for (id, n) in repeats {
+                    t.entry(id).or_default().repeats += n;
+                }
             }
             if let Ok(mut f) = w.frames.lock()
                 && !f.is_empty()
@@ -904,14 +927,20 @@ impl Renderer {
             // SAFETY: width x height RGBA8 rows into a texture of that size.
             unsafe { self.context.UpdateSubresource(&r.tex, 0, None, f.rgba.as_ptr().cast(), f.width * 4, 0) };
             let visible = self.videos.iter().any(|v| v.id == id);
-            stats.video_frames.fetch_add(1, Ordering::Relaxed);
+            if !f.redraw {
+                stats.video_frames.fetch_add(1, Ordering::Relaxed);
+            }
             stats.copied_frames.fetch_add(1, Ordering::Relaxed);
             stats.copied_bytes.fetch_add(f.rgba.len() as u64, Ordering::Relaxed);
             let us = u64::from(f.readback_us) + t.elapsed().as_micros() as u64;
             stats.copy_us.fetch_add(us, Ordering::Relaxed);
             if let Ok(mut t) = stats.tiles.lock() {
                 let e = t.entry(id).or_default();
-                e.frames += 1;
+                if f.redraw {
+                    e.redraws += 1;
+                } else {
+                    e.frames += 1;
+                }
                 e.copied += 1;
                 e.copy_us += us;
                 (e.width, e.height) = size;

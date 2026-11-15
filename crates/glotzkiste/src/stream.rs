@@ -127,6 +127,19 @@ pub struct Status {
     pub decoder: String,
 }
 
+/// The download rate covers this much time (segments arrive every ~2 s).
+const RATE_WINDOW: Duration = Duration::from_secs(4);
+
+/// kbit/s between the oldest and newest sample; 0 until a second passed.
+fn download_rate(samples: &std::collections::VecDeque<(Instant, u64)>, now: Instant) -> f64 {
+    let (Some((t0, b0)), Some((_, b1))) = (samples.front(), samples.back()) else { return 0.0 };
+    let secs = now.duration_since(*t0).as_secs_f64();
+    if secs < 1.0 {
+        return 0.0;
+    }
+    b1.saturating_sub(*b0) as f64 * 8.0 / 1000.0 / secs
+}
+
 /// True while the stats window is open: stream threads then sample mpv
 /// twice a second. Closed, the stats cost nothing.
 pub static STATS_ON: AtomicBool = AtomicBool::new(false);
@@ -712,6 +725,9 @@ impl Control {
         let mut last_control = Instant::now();
         let mut refreshing_since: Option<Instant> = None;
         let mut last_sample: Option<(Instant, u64)> = None;
+        // Bytes received over the last seconds: segments arrive in bursts,
+        // so the download rate is averaged over a window (GK-5).
+        let mut received: std::collections::VecDeque<(Instant, u64)> = std::collections::VecDeque::new();
         let mut busy = self.busy();
         // Test hook: GK_TEST_RESYNC_AT=<seconds> forces one live-edge resync.
         let mut test_resync = std::env::var("GK_TEST_RESYNC_AT")
@@ -890,14 +906,11 @@ impl Control {
                 {
                     let now = Instant::now();
                     let bytes = feed.bytes_received();
-                    let download_kbps = match last_sample {
-                        Some((t, b)) => {
-                            (bytes.saturating_sub(b)) as f64 * 8.0
-                                / 1000.0
-                                / now.duration_since(t).as_secs_f64().max(0.001)
-                        }
-                        None => 0.0,
-                    };
+                    received.push_back((now, bytes));
+                    while received.len() > 2 && received[1].0.elapsed() >= RATE_WINDOW {
+                        received.pop_front();
+                    }
+                    let download_kbps = download_rate(&received, now);
                     last_sample = Some((now, bytes));
                     let d = |n: &str| mpv.get_double(n).unwrap_or(0.0);
                     let i = |n: &str| mpv.get_i64(n).unwrap_or(0);
@@ -941,5 +954,27 @@ impl Control {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn download_rate_spans_bursts() {
+        let t0 = Instant::now();
+        // 1 MB arrives at once, then nothing for 3.5 s: still about 2 Mbit/s
+        // over the 4 s window, not 0.
+        let samples: VecDeque<(Instant, u64)> = VecDeque::from([
+            (t0, 0),
+            (t0 + Duration::from_millis(500), 1_000_000),
+            (t0 + Duration::from_secs(4), 1_000_000),
+        ]);
+        let r = download_rate(&samples, t0 + Duration::from_secs(4));
+        assert!((r - 2000.0).abs() < 1.0, "{r}");
+        // Less than a second of history: no number yet.
+        assert_eq!(download_rate(&VecDeque::from([(t0, 0)]), t0 + Duration::from_millis(500)), 0.0);
     }
 }

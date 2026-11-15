@@ -84,6 +84,30 @@ impl Placer {
         Some(self.on(l))
     }
 
+    /// A GPU earlier in placement order than `from` (so: not the main GPU
+    /// when `from` is another one) with room for one more stream. Used to
+    /// move streams back toward the preferred GPUs.
+    pub fn earlier_with_room(&mut self, from: Luid) -> Option<DecodeOn> {
+        let order: Vec<Luid> = self.order().iter().map(|g| g.luid).collect();
+        let pos = order.iter().position(|l| *l == from)?;
+        let l = order[..pos]
+            .iter()
+            .copied()
+            .find(|l| self.gpus.iter().find(|g| g.luid == *l).is_some_and(|g| self.has_room(g)))?;
+        *self.placed.entry(l).or_default() += 1;
+        Some(self.on(l))
+    }
+
+    /// Position in placement order (0 first); the CPU after every GPU.
+    pub fn rank(&self, on: DecodeOn) -> usize {
+        let luid = match on {
+            DecodeOn::Gpu => self.main,
+            DecodeOn::Second(l) => l,
+            DecodeOn::Cpu => return usize::MAX,
+        };
+        self.order().iter().position(|g| g.luid == luid).unwrap_or(usize::MAX - 1)
+    }
+
     /// A new load sample: `streams_on` counts the streams decoding on each
     /// GPU now.
     pub fn update(&mut self, gpus: Vec<Gpu>, streams_on: HashMap<Luid, u32>) {
@@ -217,6 +241,22 @@ mod tests {
         assert_eq!(p.choose_except(Some(IGPU)), None, "nowhere to go: the caller uses the CPU");
         p.update(vec![gpu("main", MAIN, 30.0), gpu("igpu", IGPU, 95.0)], HashMap::from([(MAIN, 3), (IGPU, 4)]));
         assert_eq!(p.choose_except(Some(IGPU)), Some(DecodeOn::Gpu));
+    }
+
+    #[test]
+    fn rebalancing_moves_toward_earlier_gpus_only() {
+        let mut p = Placer::new(MAIN, vec![gpu("main", MAIN, 0.0), gpu("igpu", IGPU, 0.0)]);
+        // The owner's 42 streams: main full, the iGPU at 30 % with 5 streams.
+        p.update(vec![gpu("main", MAIN, 100.0), gpu("igpu", IGPU, 30.0)], HashMap::from([(MAIN, 37), (IGPU, 5)]));
+        assert_eq!(p.earlier_with_room(MAIN), Some(DecodeOn::Second(IGPU)));
+        // 6 % per stream there: room for several more before 80 %.
+        let more = (0..20).filter(|_| p.earlier_with_room(MAIN).is_some()).count();
+        assert!((6..=8).contains(&more), "{more}");
+        // Nothing is earlier than the first GPU.
+        assert_eq!(p.earlier_with_room(IGPU), None);
+        assert_eq!(p.rank(DecodeOn::Second(IGPU)), 0);
+        assert_eq!(p.rank(DecodeOn::Gpu), 1);
+        assert_eq!(p.rank(DecodeOn::Cpu), usize::MAX);
     }
 
     #[test]

@@ -116,6 +116,7 @@ jobs:
               exit 1
             fi
             gh release upload "$RELEASE_TAG" dist/* --clobber
+            gh release edit "$RELEASE_TAG" --notes-file notes.md --title "Glotzkiste $RELEASE_TAG"
           else
             gh release create "$RELEASE_TAG" dist/* "${flags[@]}"
           fi
