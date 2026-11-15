@@ -28,7 +28,8 @@ pub struct Emote {
 }
 
 /// BTTV's global overlay emotes (its API has no zero-width flag).
-const BTTV_ZERO_WIDTH: &[&str] = &["SoSnowy", "IceCold", "SantaHat", "TopHat", "ReinDeer", "CandyCane", "cvMask", "cvHazmat"];
+const BTTV_ZERO_WIDTH: &[&str] =
+    &["SoSnowy", "IceCold", "SantaHat", "TopHat", "ReinDeer", "CandyCane", "cvMask", "cvHazmat"];
 /// 7TV emote flag: zero-width.
 const SEVENTV_ZERO_WIDTH: u64 = 1 << 8;
 
@@ -195,7 +196,9 @@ mod tests {
 
     #[test]
     fn bttv_and_ffz() {
-        let b = bttv_emotes(&json!([{"id":"x1","code":"IceCold","animated":false},{"id":"x2","code":"catJAM","animated":true}]));
+        let b = bttv_emotes(
+            &json!([{"id":"x1","code":"IceCold","animated":false},{"id":"x2","code":"catJAM","animated":true}]),
+        );
         assert!(b[0].zero_width && !b[1].zero_width && b[1].animated);
         assert_eq!(b[1].url, "https://cdn.betterttv.net/emote/x2/2x.webp");
         let f = ffz_emotes(&json!([{"id":7,"code":"LULW","images":{"1x":"https://f/1","2x":"https://f/2","4x":null}}]));

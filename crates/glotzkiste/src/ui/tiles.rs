@@ -1,12 +1,12 @@
 //! The tile area: stream tiles (video, hover bar, quality, audio focus),
 //! chat panes and empty panes, arranged by egui_tiles.
 
+use super::chat::channel_color;
 use super::{ACCENT, BAD, GOOD, MUTED, PANEL, RAISED, TEXT, WARN, pill};
 use crate::app::App;
 use crate::chat_state::{BadgeMap, ChatState};
 use crate::images::Images;
 use crate::layout::{ChatMode, Pane, StreamPane, chat_channels};
-use super::chat::channel_color;
 use crate::stream::{Cmd, Quality, State, Status, StreamHandle};
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, pos2, vec2};
 use egui_tiles::{TileId, UiResponse};
@@ -73,24 +73,37 @@ impl Behavior<'_> {
             (rect.max.x * ppp).round() as i32,
             (rect.max.y * ppp).round() as i32,
         ];
-        let aligned = Rect::from_min_max(pos2(px[0] as f32 / ppp, px[1] as f32 / ppp), pos2(px[2] as f32 / ppp, px[3] as f32 / ppp));
+        let aligned = Rect::from_min_max(
+            pos2(px[0] as f32 / ppp, px[1] as f32 / ppp),
+            pos2(px[2] as f32 / ppp, px[3] as f32 / ppp),
+        );
         let handle = self.streams.get(&p.id);
         let st = handle.map(|s| s.status()).unwrap_or_default();
         let painter = ui.painter().clone();
         painter.rect_filled(aligned, 0.0, Color32::BLACK);
         if p.id != 0 && px[2] > px[0] && px[3] > px[1] {
-            painter.image(egui::TextureId::User(p.id), aligned, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+            painter.image(
+                egui::TextureId::User(p.id),
+                aligned,
+                Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
             self.videos.push(VideoTile { id: p.id, rect_px: px });
             self.heights.push((p.id, (px[3] - px[1]).max(1) as u32));
         }
         let audible = self.audio.as_deref() == Some(p.channel.as_str());
         if let (Some(rates), Some(h)) = (self.overlay, handle) {
-            let area = Rect::from_min_max(pos2(rect.min.x + 8.0, rect.min.y + 42.0), pos2(rect.max.x - 8.0, rect.max.y - 8.0));
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::bottom_up(egui::Align::Min)));
+            let area =
+                Rect::from_min_max(pos2(rect.min.x + 8.0, rect.min.y + 42.0), pos2(rect.max.x - 8.0, rect.max.y - 8.0));
+            let mut child =
+                ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::bottom_up(egui::Align::Min)));
             child.set_clip_rect(rect);
-            egui::Frame::NONE.fill(Color32::from_black_alpha(190)).corner_radius(6).inner_margin(8).show(&mut child, |ui| {
-                super::stats::stream_table(ui, ("tile-stats", p.id), &st, &h.stats(), rates, p.id);
-            });
+            egui::Frame::NONE.fill(Color32::from_black_alpha(190)).corner_radius(6).inner_margin(8).show(
+                &mut child,
+                |ui| {
+                    super::stats::stream_table(ui, ("tile-stats", p.id), &st, &h.stats(), rates, p.id);
+                },
+            );
         }
         let info = self.info.get(&p.channel);
         let name = info.map(|i| i.display_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| p.channel.clone());
@@ -125,7 +138,13 @@ impl Behavior<'_> {
         let mut response = UiResponse::None;
         if !hovered {
             if audible {
-                painter.text(rect.left_top() + vec2(10.0, 8.0), egui::Align2::LEFT_TOP, "🔊", FontId::proportional(14.0), TEXT);
+                painter.text(
+                    rect.left_top() + vec2(10.0, 8.0),
+                    egui::Align2::LEFT_TOP,
+                    "🔊",
+                    FontId::proportional(14.0),
+                    TEXT,
+                );
             }
             return response;
         }
@@ -143,20 +162,30 @@ impl Behavior<'_> {
         if drag.double_clicked() {
             self.acts.push(Act::Maximize(tile));
         }
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(8.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(bar.shrink2(vec2(8.0, 4.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
         let ui = &mut child;
         ui.label(RichText::new(if audible { "🔊" } else { "🔈" }).color(if audible { TEXT } else { MUTED }));
         ui.label(RichText::new(&name).font(crate::fonts::bold(14.0)).color(TEXT));
         if let Some(i) = info.filter(|i| i.live) {
-            let viewers = if i.viewers >= 1000 { format!("{:.1}k", i.viewers as f64 / 1000.0) } else { i.viewers.to_string() };
-            ui.label(RichText::new(format!("{viewers} · {}", i.category)).color(MUTED).size(12.0)).on_hover_text(&i.title);
+            let viewers =
+                if i.viewers >= 1000 { format!("{:.1}k", i.viewers as f64 / 1000.0) } else { i.viewers.to_string() };
+            ui.label(RichText::new(format!("{viewers} · {}", i.category)).color(MUTED).size(12.0))
+                .on_hover_text(&i.title);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(egui::Button::new("✕").frame(false)).on_hover_text("Remove").clicked() {
                 self.acts.push(Act::Remove(tile));
             }
             let max_label = if self.maximized == Some(tile) { "🗗" } else { "⛶" };
-            if ui.add(egui::Button::new(max_label).frame(false)).on_hover_text("Maximize in this tab (double-click, Esc)").clicked() {
+            if ui
+                .add(egui::Button::new(max_label).frame(false))
+                .on_hover_text("Maximize in this tab (double-click, Esc)")
+                .clicked()
+            {
                 self.acts.push(Act::Maximize(tile));
             }
             if ui.add(egui::Button::new("💬").frame(false)).on_hover_text("Open the chat beside it").clicked() {
@@ -165,7 +194,9 @@ impl Behavior<'_> {
             // Volume (only for the stream with the sound).
             if audible {
                 let mut v = p.volume as f32;
-                let r = ui.add_sized([80.0, 18.0], egui::Slider::new(&mut v, 0.0..=100.0).show_value(false)).on_hover_text(format!("Volume {v:.0}"));
+                let r = ui
+                    .add_sized([80.0, 18.0], egui::Slider::new(&mut v, 0.0..=100.0).show_value(false))
+                    .on_hover_text(format!("Volume {v:.0}"));
                 if r.changed() {
                     p.volume = f64::from(v);
                     if let Some(h) = handle {
@@ -181,8 +212,13 @@ impl Behavior<'_> {
             // Quality.
             let label = quality_label(&p.quality, &st);
             egui::ComboBox::from_id_salt(("quality", tile)).selected_text(label).width(120.0).show_ui(ui, |ui| {
-                let auto_hint = if st.current.is_empty() { "Auto".to_owned() } else { format!("Auto ({})", st.current) };
-                if ui.selectable_label(p.quality == Quality::Auto, auto_hint).on_hover_text("Matches the tile size").clicked() {
+                let auto_hint =
+                    if st.current.is_empty() { "Auto".to_owned() } else { format!("Auto ({})", st.current) };
+                if ui
+                    .selectable_label(p.quality == Quality::Auto, auto_hint)
+                    .on_hover_text("Matches the tile size")
+                    .clicked()
+                {
                     p.quality = Quality::Auto;
                     if let Some(h) = handle {
                         h.send(Cmd::Quality(Quality::Auto));
@@ -204,7 +240,9 @@ impl Behavior<'_> {
                 let t = st.buffer_tenths;
                 let text = format!("{}{:.1}s", if st.speed_up { "» " } else { "" }, t as f64 / 10.0);
                 pill(ui, &text, RAISED, latency_color(t));
-                ui.label("").on_hover_text("Delay behind the live edge we receive (Twitch adds its own ~1-2 s). » = catching up.");
+                ui.label("").on_hover_text(
+                    "Delay behind the live edge we receive (Twitch adds its own ~1-2 s). » = catching up.",
+                );
                 if st.drops > 0 {
                     ui.label(RichText::new(format!("{} dropped", st.drops)).color(MUTED).size(11.0));
                 }
@@ -226,8 +264,16 @@ impl Behavior<'_> {
         }
         let shown = chat_channels(channel, mode, &self.tab_streams);
         let dot = if self.chat.connected { GOOD } else { WARN };
-        let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(header.shrink2(vec2(10.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        hui.label(RichText::new("●").color(dot).size(10.0)).on_hover_text(if self.chat.connected { "Connected" } else { "Connecting…" });
+        let mut hui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(header.shrink2(vec2(10.0, 4.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        hui.label(RichText::new("●").color(dot).size(10.0)).on_hover_text(if self.chat.connected {
+            "Connected"
+        } else {
+            "Connecting…"
+        });
         // The title is the channel picker.
         let title = match mode {
             ChatMode::One => format!("{channel} chat ▾"),
@@ -240,9 +286,18 @@ impl Behavior<'_> {
             ui.set_max_width(300.0);
             // One list: the name shows only that chat, the box combines.
             let mut filter = ui.data_mut(|d| d.get_temp::<String>(filter_id).unwrap_or_default());
-            let r = ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Filter, or type a channel + Enter").desired_width(f32::INFINITY));
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut filter)
+                    .hint_text("Filter, or type a channel + Enter")
+                    .desired_width(f32::INFINITY),
+            );
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                let login = filter.trim().trim_start_matches("https://").trim_start_matches("www.").trim_start_matches("twitch.tv/").to_ascii_lowercase();
+                let login = filter
+                    .trim()
+                    .trim_start_matches("https://")
+                    .trim_start_matches("www.")
+                    .trim_start_matches("twitch.tv/")
+                    .to_ascii_lowercase();
                 if gk_twitch::api::valid_login(&login) {
                     *mode = ChatMode::One;
                     *channel = login;
@@ -251,7 +306,11 @@ impl Behavior<'_> {
                 }
             }
             let all = *mode == ChatMode::AllStreams;
-            if ui.selectable_label(all, format!("All streams in this tab ({})", self.tab_streams.len())).on_hover_text("One chat for every stream here; follows the tab").clicked() {
+            if ui
+                .selectable_label(all, format!("All streams in this tab ({})", self.tab_streams.len()))
+                .on_hover_text("One chat for every stream here; follows the tab")
+                .clicked()
+            {
                 *mode = if all { ChatMode::One } else { ChatMode::AllStreams };
             }
             ui.separator();
@@ -277,7 +336,11 @@ impl Behavior<'_> {
                             changed = true;
                         }
                         let only = *mode == ChatMode::One && channel == c;
-                        if ui.selectable_label(only, RichText::new(c).color(channel_color(c))).on_hover_text("Show only this chat").clicked() {
+                        if ui
+                            .selectable_label(only, RichText::new(c).color(channel_color(c)))
+                            .on_hover_text("Show only this chat")
+                            .clicked()
+                        {
                             *mode = ChatMode::One;
                             *channel = c.clone();
                             ui.close();
@@ -317,7 +380,8 @@ impl Behavior<'_> {
             return response;
         }
         let src = super::chat::Source { channels };
-        let mut paint = super::chat::Paint { images: self.images, global_badges: &global, generation: self.chat.generation };
+        let mut paint =
+            super::chat::Paint { images: self.images, global_badges: &global, generation: self.chat.generation };
         let view = self.chat_views.entry(tile).or_default();
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
         match view.show(&mut child, body, &src, can_send, &mut paint) {
@@ -330,11 +394,22 @@ impl Behavior<'_> {
 
     fn empty_ui(&mut self, ui: &mut egui::Ui, tile: TileId) -> UiResponse {
         let rect = ui.max_rect();
-        ui.painter().rect_stroke(rect.shrink(6.0), CornerRadius::same(10), egui::Stroke::new(1.0, RAISED), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(
+            rect.shrink(6.0),
+            CornerRadius::same(10),
+            egui::Stroke::new(1.0, RAISED),
+            egui::StrokeKind::Inside,
+        );
         let inner = Rect::from_center_size(rect.center(), vec2(300.0_f32.min(rect.width() - 20.0), 90.0));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)));
+        let mut child =
+            ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)));
         child.label(RichText::new("Watch a channel").font(crate::fonts::bold(18.0)).color(TEXT));
-        let r = child.add(egui::TextEdit::singleline(self.add_text).hint_text("channel name or twitch.tv link").desired_width(inner.width()).id_salt(("empty-add", tile)));
+        let r = child.add(
+            egui::TextEdit::singleline(self.add_text)
+                .hint_text("channel name or twitch.tv link")
+                .desired_width(inner.width())
+                .id_salt(("empty-add", tile)),
+        );
         if r.lost_focus() && child.input(|i| i.key_pressed(egui::Key::Enter)) {
             self.acts.push(Act::Add(std::mem::take(self.add_text)));
         }
@@ -347,7 +422,9 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile: TileId, pane: &mut Pane) -> UiResponse {
         let kind = match pane {
             Pane::Stream(p) => super::stats::TileKind::Stream { id: p.id, channel: p.channel.clone() },
-            Pane::Chat { channel, mode } => super::stats::TileKind::Chat { channel: chat_channels(channel, mode, &self.tab_streams).join(" + ") },
+            Pane::Chat { channel, mode } => {
+                super::stats::TileKind::Chat { channel: chat_channels(channel, mode, &self.tab_streams).join(" + ") }
+            }
             Pane::Empty => super::stats::TileKind::Empty,
         };
         self.rects.push(super::stats::TileRect { rect: ui.max_rect(), kind });
@@ -360,7 +437,13 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
 
     fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
         match pane {
-            Pane::Stream(p) => self.info.get(&p.channel).map(|i| i.display_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| p.channel.clone()).into(),
+            Pane::Stream(p) => self
+                .info
+                .get(&p.channel)
+                .map(|i| i.display_name.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| p.channel.clone())
+                .into(),
             Pane::Chat { channel, mode } => match mode {
                 ChatMode::One => format!("{channel} chat").into(),
                 _ => "combined chat".into(),
@@ -402,7 +485,9 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
     }
     // Views of chat panes that no longer exist are dropped.
     if let Some(tab) = app.tabs.get(active) {
-        app.chat_views.retain(|id, _| tab.tree.tiles.get(*id).is_some() || app.tabs.iter().any(|t| t.tree.tiles.get(*id).is_some()));
+        app.chat_views.retain(|id, _| {
+            tab.tree.tiles.get(*id).is_some() || app.tabs.iter().any(|t| t.tree.tiles.get(*id).is_some())
+        });
     }
     let mut b = Behavior {
         streams: &app.streams,

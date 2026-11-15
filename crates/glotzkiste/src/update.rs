@@ -22,7 +22,8 @@ pub fn installed() -> bool {
 }
 
 pub fn current() -> Version {
-    Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::parse("0.0.0").unwrap_or_else(|_| unreachable!()))
+    Version::parse(env!("CARGO_PKG_VERSION"))
+        .unwrap_or_else(|_| Version::parse("0.0.0").unwrap_or_else(|_| unreachable!()))
 }
 
 pub enum Outcome {
@@ -73,7 +74,10 @@ pub fn spawn_check(force: bool, done: impl FnOnce(Result<Outcome, String>) + Sen
 /// app; the setup waits for it, installs and starts it again.
 fn install(c: &Candidate) -> Result<(), String> {
     if !installed() {
-        return Err(format!("This copy was not installed by the setup; get Glotzkiste {} from {RELEASE_PAGE}", c.version));
+        return Err(format!(
+            "This copy was not installed by the setup; get Glotzkiste {} from {RELEASE_PAGE}",
+            c.version
+        ));
     }
     let setup = gk_update::download_verified(c).map_err(|e| e.to_string())?;
     // A fresh folder per attempt: never runs a file someone else placed.

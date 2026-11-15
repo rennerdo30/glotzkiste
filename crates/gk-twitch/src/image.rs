@@ -55,10 +55,10 @@ fn cache_path(url: &str) -> Option<PathBuf> {
 /// Downloads `url` (or reads it from the disk cache) and decodes it.
 pub fn fetch_decoded(http: &Http, url: &str) -> Result<DecodedImage> {
     let cached = cache_path(url);
-    if let Some(bytes) = cached.as_ref().and_then(|p| std::fs::read(p).ok()) {
-        if let Ok(img) = decode(&bytes) {
-            return Ok(img);
-        }
+    if let Some(bytes) = cached.as_ref().and_then(|p| std::fs::read(p).ok())
+        && let Ok(img) = decode(&bytes)
+    {
+        return Ok(img);
     }
     let bytes = http.get_bytes(url, &[], MAX_DOWNLOAD)?;
     let img = decode(&bytes)?;
@@ -94,7 +94,7 @@ fn frames_from<'a>(decoder: impl AnimationDecoder<'a>) -> Result<Vec<Frame>> {
     for f in decoder.into_frames() {
         let f = f.map_err(|e| Error::Image(e.to_string()))?;
         let (n, d) = f.delay().numer_denom_ms();
-        let delay = if d == 0 { 100 } else { n / d };
+        let delay = n.checked_div(d).unwrap_or(100);
         out.push(frame_from(f.into_buffer(), delay));
         if out.len() >= MAX_FRAMES {
             break;

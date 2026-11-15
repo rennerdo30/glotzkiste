@@ -67,8 +67,10 @@ fn process_usage() -> (u64, u64) {
         use windows::Win32::Foundation::FILETIME;
         use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
         use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
-        let (mut c, mut e, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
-        let mut mem = PROCESS_MEMORY_COUNTERS { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
+        let (mut c, mut e, mut k, mut u) =
+            (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        let mut mem =
+            PROCESS_MEMORY_COUNTERS { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
         // SAFETY: out pointers are valid locals; the pseudo handle needs no close.
         unsafe {
             let p = GetCurrentProcess();
@@ -116,7 +118,11 @@ impl Sampler {
             self.rates = Rates {
                 presents_s: per(now.presents, l.presents),
                 passes_s: per(now.passes, l.passes),
-                pass_ms: if passes_d > 0 { now.pass_us.saturating_sub(l.pass_us) as f64 / 1000.0 / passes_d as f64 } else { 0.0 },
+                pass_ms: if passes_d > 0 {
+                    now.pass_us.saturating_sub(l.pass_us) as f64 / 1000.0 / passes_d as f64
+                } else {
+                    0.0
+                },
                 render_busy_pct: now.busy_us.saturating_sub(l.busy_us) as f64 / 10_000.0 / dt,
                 anim_s: per(now.anim, l.anim),
                 slow_waits: ld(&st.slow_waits),
@@ -163,7 +169,14 @@ fn codec_name(raw: &str) -> &str {
 }
 
 /// The table for one stream.
-pub fn stream_table(ui: &mut egui::Ui, id_salt: impl std::hash::Hash + std::fmt::Debug, status: &Status, s: &StreamStats, rates: &Rates, stream_id: u64) {
+pub fn stream_table(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    status: &Status,
+    s: &StreamStats,
+    rates: &Rates,
+    stream_id: u64,
+) {
     egui::Grid::new(id_salt).num_columns(2).spacing(vec2(10.0, 2.0)).show(ui, |ui| {
         let state = match &status.state {
             _ if status.in_ad => RichText::new("ad break, skipping").color(WARN),
@@ -197,12 +210,24 @@ pub fn stream_table(ui: &mut egui::Ui, id_salt: impl std::hash::Hash + std::fmt:
             WARN
         };
         let decoder = if s.decoded_fps > 0.0 { format!(" · decoder {:.1}", s.decoded_fps) } else { String::new() };
-        row(ui, "Frames", RichText::new(format!("{shown:.1} of {:.0} fps shown{decoder}", s.source_fps)).color(fps_color));
+        row(
+            ui,
+            "Frames",
+            RichText::new(format!("{shown:.1} of {:.0} fps shown{decoder}", s.source_fps)).color(fps_color),
+        );
         let (repeats, redraws) = rates.tile_extra.get(&stream_id).copied().unwrap_or((0.0, 0.0));
         if repeats + redraws >= 0.5 {
-            row(ui, "Extra renders", RichText::new(format!("{repeats:.1} repeats/s · {redraws:.1} redraws/s")).color(MUTED));
+            row(
+                ui,
+                "Extra renders",
+                RichText::new(format!("{repeats:.1} repeats/s · {redraws:.1} redraws/s")).color(MUTED),
+            );
         }
-        let viewport = if tile.visible { format!("{}×{} px", tile.width, tile.height) } else { "hidden (not decoding video)".into() };
+        let viewport = if tile.visible {
+            format!("{}×{} px", tile.width, tile.height)
+        } else {
+            "hidden (not decoding video)".into()
+        };
         row(ui, "Viewport", plain(viewport));
         let drops = s.drops_vo + s.drops_decoder;
         let mut parts = vec![format!("output {}", s.drops_vo), format!("decoder {}", s.drops_decoder)];
@@ -212,11 +237,21 @@ pub fn stream_table(ui: &mut egui::Ui, id_salt: impl std::hash::Hash + std::fmt:
         if s.mistimed > 0 {
             parts.push(format!("mistimed {}", s.mistimed));
         }
-        row(ui, "Dropped", RichText::new(format!("{drops}  ({})", parts.join(", "))).color(if drops == 0 { GOOD } else { WARN }));
+        row(
+            ui,
+            "Dropped",
+            RichText::new(format!("{drops}  ({})", parts.join(", "))).color(if drops == 0 { GOOD } else { WARN }),
+        );
         let (dec, dec_col) = decoder_label(status, s);
         row(ui, "Decoder", RichText::new(dec).color(dec_col));
         let behind = s.cache_s + s.pipe_s;
-        let lat_color = if behind <= 1.2 { GOOD } else if behind <= 3.0 { WARN } else { BAD };
+        let lat_color = if behind <= 1.2 {
+            GOOD
+        } else if behind <= 3.0 {
+            WARN
+        } else {
+            BAD
+        };
         let speed = if s.speed > 1.001 {
             format!(" · catching up ×{:.2}", s.speed)
         } else if s.speed < 0.999 {
@@ -225,7 +260,11 @@ pub fn stream_table(ui: &mut egui::Ui, id_salt: impl std::hash::Hash + std::fmt:
             String::new()
         };
         row(ui, "Buffered", RichText::new(format!("{behind:.2} s{speed}")).color(lat_color));
-        row(ui, "Network", plain(format!("{:.0} kbit/s in · stream {:.0} kbit/s", s.download_kbps, s.video_kbps + s.audio_kbps)));
+        row(
+            ui,
+            "Network",
+            plain(format!("{:.0} kbit/s in · stream {:.0} kbit/s", s.download_kbps, s.video_kbps + s.audio_kbps)),
+        );
         row(
             ui,
             "Segments",
@@ -297,27 +336,55 @@ pub fn contents(ui: &mut egui::Ui, mut c: Ctx<'_>) {
     let r = c.rates;
     ui.horizontal(|ui| {
         let pill = |ui: &mut egui::Ui, k: &str, v: String, col: Color32| {
-            egui::Frame::NONE.fill(RAISED).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 3)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Label::new(RichText::new(k).color(MUTED).size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
-                    ui.add(egui::Label::new(RichText::new(v).color(col).size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
-                });
-            });
+            egui::Frame::NONE.fill(RAISED).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 3)).show(
+                ui,
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(k).color(MUTED).size(12.0))
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                        ui.add(
+                            egui::Label::new(RichText::new(v).color(col).size(12.0))
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    });
+                },
+            );
         };
         pill(ui, "Display", format!("{:.0} presents/s", r.presents_s), TEXT);
-        pill(ui, "UI", format!("{:.1} passes/s · {:.2} ms each", r.passes_s, r.pass_ms), if r.pass_ms < 4.0 { GOOD } else { WARN });
-        pill(ui, "Render thread", format!("{:.1} % of a core", r.render_busy_pct), if r.render_busy_pct < 40.0 { GOOD } else { WARN });
+        pill(
+            ui,
+            "UI",
+            format!("{:.1} passes/s · {:.2} ms each", r.passes_s, r.pass_ms),
+            if r.pass_ms < 4.0 { GOOD } else { WARN },
+        );
+        pill(
+            ui,
+            "Render thread",
+            format!("{:.1} % of a core", r.render_busy_pct),
+            if r.render_busy_pct < 40.0 { GOOD } else { WARN },
+        );
         pill(ui, "Emote animation", format!("{:.0} redraws/s", r.anim_s), TEXT);
         pill(ui, "Slow presents", r.slow_waits.to_string(), if r.slow_waits == 0 { GOOD } else { WARN });
     });
     ui.horizontal(|ui| {
         let pill = |ui: &mut egui::Ui, k: &str, v: String, col: Color32| {
-            egui::Frame::NONE.fill(RAISED).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 3)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Label::new(RichText::new(k).color(MUTED).size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
-                    ui.add(egui::Label::new(RichText::new(v).color(col).size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
-                });
-            });
+            egui::Frame::NONE.fill(RAISED).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 3)).show(
+                ui,
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(k).color(MUTED).size(12.0))
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                        ui.add(
+                            egui::Label::new(RichText::new(v).color(col).size(12.0))
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    });
+                },
+            );
         };
         pill(ui, "Process", format!("{:.1} % CPU · {:.0} MB", r.cpu_pct, r.ram_mb), TEXT);
         // Video decoders, ours first.
@@ -325,7 +392,13 @@ pub fn contents(ui: &mut egui::Ui, mut c: Ctx<'_>) {
         gpus.sort_by_key(|g| g.luid != c.render_luid);
         for g in gpus {
             let mine = g.luid == c.render_luid;
-            let col = if g.decode_pct >= 90.0 { BAD } else if g.decode_pct >= 70.0 { WARN } else { GOOD };
+            let col = if g.decode_pct >= 90.0 {
+                BAD
+            } else if g.decode_pct >= 70.0 {
+                WARN
+            } else {
+                GOOD
+            };
             let label = if mine { "Video decoder" } else { "Other GPU decoder" };
             pill(ui, label, format!("{:.0} % · {}", g.decode_pct, g.name), col);
         }
@@ -338,7 +411,8 @@ pub fn contents(ui: &mut egui::Ui, mut c: Ctx<'_>) {
     };
     ui.horizontal(|ui| {
         ui.label(RichText::new("View").color(MUTED));
-        let auto_label = if c.state.view == View::Auto { if table { "Auto (table)" } else { "Auto (layout)" } } else { "Auto" };
+        let auto_label =
+            if c.state.view == View::Auto { if table { "Auto (table)" } else { "Auto (layout)" } } else { "Auto" };
         ui.selectable_value(&mut c.state.view, View::Auto, auto_label)
             .on_hover_text("A table above 9 streams, the tile layout otherwise");
         ui.selectable_value(&mut c.state.view, View::Layout, "Layout");
@@ -354,7 +428,10 @@ pub fn contents(ui: &mut egui::Ui, mut c: Ctx<'_>) {
         .rects
         .iter()
         .filter_map(|t| match &t.kind {
-            TileKind::Chat { channel } => Some(format!("{channel} ({} kept)", channel.split(" + ").map(|ch| c.chat_lines.get(ch).copied().unwrap_or(0)).sum::<usize>())),
+            TileKind::Chat { channel } => Some(format!(
+                "{channel} ({} kept)",
+                channel.split(" + ").map(|ch| c.chat_lines.get(ch).copied().unwrap_or(0)).sum::<usize>()
+            )),
             _ => None,
         })
         .collect();
@@ -388,7 +465,9 @@ fn stream_map(ui: &mut egui::Ui, c: &Ctx<'_>, streams: &[&TileRect]) {
         let cell = to_map(t.rect).shrink(2.0);
         ui.painter().rect_filled(cell, 6.0, PANEL);
         ui.painter().rect_stroke(cell, 6.0, egui::Stroke::new(1.0, RAISED), egui::StrokeKind::Inside);
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cell.shrink(8.0)).layout(egui::Layout::top_down(egui::Align::Min)));
+        let mut child = ui.new_child(
+            egui::UiBuilder::new().max_rect(cell.shrink(8.0)).layout(egui::Layout::top_down(egui::Align::Min)),
+        );
         child.set_clip_rect(cell.shrink(2.0));
         child.label(RichText::new(channel).font(crate::fonts::bold(14.0)).color(TEXT));
         let status = c.statuses.get(id).cloned().unwrap_or_default();
@@ -447,7 +526,12 @@ fn stream_rows(ui: &mut egui::Ui, c: &mut Ctx<'_>, streams: &[&TileRect]) {
                 let on = c.state.sort == by;
                 let arrow = if on { if c.state.descending { " ▾" } else { " ▴" } } else { "" };
                 // `c.state` is borrowed mutably below through a raw toggle.
-                let r = ui.add(egui::Label::new(RichText::new(format!("{label}{arrow}")).color(if on { TEXT } else { MUTED }).strong()).sense(egui::Sense::click()));
+                let r = ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{label}{arrow}")).color(if on { TEXT } else { MUTED }).strong(),
+                    )
+                    .sense(egui::Sense::click()),
+                );
                 r.clicked()
             };
             let mut clicked: Option<SortBy> = None;
@@ -457,7 +541,12 @@ fn stream_rows(ui: &mut egui::Ui, c: &mut Ctx<'_>, streams: &[&TileRect]) {
                 }
             }
             ui.label(RichText::new("State").color(MUTED).strong());
-            for (label, by) in [("Frames shown", SortBy::Fps), ("Dropped", SortBy::Dropped), ("Buffered", SortBy::Buffered), ("Network", SortBy::Network)] {
+            for (label, by) in [
+                ("Frames shown", SortBy::Fps),
+                ("Dropped", SortBy::Dropped),
+                ("Buffered", SortBy::Buffered),
+                ("Network", SortBy::Network),
+            ] {
                 if header(ui, label, by) {
                     clicked = Some(by);
                 }
@@ -487,13 +576,31 @@ fn stream_rows(ui: &mut egui::Ui, c: &mut Ctx<'_>, streams: &[&TileRect]) {
                 };
                 ui.label(state);
                 let expected = s.source_fps * s.speed.max(0.5);
-                let fps_col = if s.source_fps <= 0.0 { TEXT } else if r.shown >= expected * 0.9 && r.shown <= expected * 1.1 { GOOD } else { WARN };
+                let fps_col = if s.source_fps <= 0.0 {
+                    TEXT
+                } else if r.shown >= expected * 0.9 && r.shown <= expected * 1.1 {
+                    GOOD
+                } else {
+                    WARN
+                };
                 ui.label(RichText::new(format!("{:.1} / {:.0}", r.shown, s.source_fps)).color(fps_col));
                 let drops = s.drops_vo + s.drops_decoder;
                 ui.label(RichText::new(drops.to_string()).color(if drops == 0 { GOOD } else { WARN }));
                 let behind = s.cache_s + s.pipe_s;
-                let speed = if s.speed > 1.001 { " »" } else if s.speed < 0.999 { " «" } else { "" };
-                ui.label(RichText::new(format!("{behind:.2} s{speed}")).color(if behind <= 1.2 { GOOD } else if behind <= 3.0 { WARN } else { BAD }));
+                let speed = if s.speed > 1.001 {
+                    " »"
+                } else if s.speed < 0.999 {
+                    " «"
+                } else {
+                    ""
+                };
+                ui.label(RichText::new(format!("{behind:.2} s{speed}")).color(if behind <= 1.2 {
+                    GOOD
+                } else if behind <= 3.0 {
+                    WARN
+                } else {
+                    BAD
+                }));
                 ui.label(RichText::new(format!("{:.0} kbit/s", s.download_kbps)).color(TEXT));
                 let tile = c.rates.tiles.get(&r.id).copied().unwrap_or_default();
                 ui.label(RichText::new(format!("{} · {}×{}", st.current, tile.width, tile.height)).color(TEXT));

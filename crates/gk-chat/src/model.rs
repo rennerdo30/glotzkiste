@@ -30,17 +30,38 @@ pub struct ChatMessage {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
-    Connected { login: String },
-    Joined { channel: String },
+    Connected {
+        login: String,
+    },
+    Joined {
+        channel: String,
+    },
     Message(ChatMessage),
     /// Subscriptions, raids and similar, with Twitch's own system text.
-    UserNotice { message: ChatMessage, system_text: String },
+    UserNotice {
+        message: ChatMessage,
+        system_text: String,
+    },
     /// A ban or timeout (`user`), or a full clear (`None`).
-    ClearChat { channel: String, user: Option<String> },
-    ClearMsg { channel: String, id: String },
-    RoomState { channel: String, room_id: String },
-    Notice { channel: String, text: String },
-    Disconnected { reason: String },
+    ClearChat {
+        channel: String,
+        user: Option<String>,
+    },
+    ClearMsg {
+        channel: String,
+        id: String,
+    },
+    RoomState {
+        channel: String,
+        room_id: String,
+    },
+    Notice {
+        channel: String,
+        text: String,
+    },
+    Disconnected {
+        reason: String,
+    },
 }
 
 fn parse_color(c: &str) -> Option<[u8; 3]> {
@@ -129,8 +150,12 @@ pub fn event_from(line: &Line) -> Option<ChatEvent> {
             channel: line.channel().to_owned(),
             user: Some(line.text().to_owned()).filter(|u| !u.is_empty()),
         },
-        "CLEARMSG" => ChatEvent::ClearMsg { channel: line.channel().to_owned(), id: line.tag("target-msg-id")?.to_owned() },
-        "ROOMSTATE" => ChatEvent::RoomState { channel: line.channel().to_owned(), room_id: line.tag("room-id")?.to_owned() },
+        "CLEARMSG" => {
+            ChatEvent::ClearMsg { channel: line.channel().to_owned(), id: line.tag("target-msg-id")?.to_owned() }
+        }
+        "ROOMSTATE" => {
+            ChatEvent::RoomState { channel: line.channel().to_owned(), room_id: line.tag("room-id")?.to_owned() }
+        }
         "NOTICE" => ChatEvent::Notice { channel: line.channel().to_owned(), text: line.text().to_owned() },
         "JOIN" => ChatEvent::Joined { channel: line.channel().to_owned() },
         _ => return None,

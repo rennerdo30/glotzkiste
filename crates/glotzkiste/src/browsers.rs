@@ -13,12 +13,14 @@ pub enum Kind {
 }
 
 /// The recommended cookie exporter (open source, MIT, exports only on click).
-pub const CHROME_STORE: &str = "https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc";
+pub const CHROME_STORE: &str =
+    "https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc";
 pub const FIREFOX_STORE: &str = "https://addons.mozilla.org/firefox/addon/get-cookies-txt-locally/";
 pub const SOURCE: &str = "https://github.com/kairi003/Get-cookies.txt-LOCALLY";
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [Kind::Chrome, Kind::Edge, Kind::Brave, Kind::Firefox, Kind::Opera, Kind::OperaGx, Kind::Vivaldi];
+    pub const ALL: [Kind; 7] =
+        [Kind::Chrome, Kind::Edge, Kind::Brave, Kind::Firefox, Kind::Opera, Kind::OperaGx, Kind::Vivaldi];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -72,15 +74,23 @@ impl Kind {
     /// What is different about installing in this browser.
     pub fn store_note(self) -> Option<&'static str> {
         match self {
-            Kind::Edge => Some("Edge asks once to \"Allow extensions from other stores\": choose Allow, then \"Add to Chrome\"."),
-            Kind::Opera | Kind::OperaGx => Some("Opera first offers its \"Install Chrome Extensions\" helper; add it, then the extension."),
+            Kind::Edge => {
+                Some("Edge asks once to \"Allow extensions from other stores\": choose Allow, then \"Add to Chrome\".")
+            }
+            Kind::Opera | Kind::OperaGx => {
+                Some("Opera first offers its \"Install Chrome Extensions\" helper; add it, then the extension.")
+            }
             _ => None,
         }
     }
 
     /// Where the cookie list is in the developer tools.
     pub fn devtools_path(self) -> &'static str {
-        if self == Kind::Firefox { "Storage › Cookies › https://www.twitch.tv" } else { "Application › Storage › Cookies › https://www.twitch.tv" }
+        if self == Kind::Firefox {
+            "Storage › Cookies › https://www.twitch.tv"
+        } else {
+            "Application › Storage › Cookies › https://www.twitch.tv"
+        }
     }
 }
 
@@ -101,7 +111,8 @@ fn reg_string(root: windows::Win32::System::Registry::HKEY, key: &str, value: Op
     let mut buf = vec![0u16; 1024];
     let mut len = (buf.len() * 2) as u32;
     // SAFETY: buffer and length describe `buf`; strings are NUL-terminated.
-    let r = unsafe { RegGetValueW(root, &key, vptr, RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr().cast()), Some(&mut len)) };
+    let r =
+        unsafe { RegGetValueW(root, &key, vptr, RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr().cast()), Some(&mut len)) };
     if r.is_err() {
         return None;
     }
@@ -136,7 +147,10 @@ pub fn detect() -> Vec<Browser> {
         // Edge always exists on Windows even without an App Paths entry.
         if !out.iter().any(|b| b.kind == Kind::Edge) {
             for base in ["ProgramFiles(x86)", "ProgramFiles"] {
-                if let Some(p) = std::env::var_os(base).map(|b| std::path::PathBuf::from(b).join("Microsoft\\Edge\\Application\\msedge.exe")).filter(|p| p.is_file()) {
+                if let Some(p) = std::env::var_os(base)
+                    .map(|b| std::path::PathBuf::from(b).join("Microsoft\\Edge\\Application\\msedge.exe"))
+                    .filter(|p| p.is_file())
+                {
                     out.push(Browser { kind: Kind::Edge, exe: p, default: default == Some(Kind::Edge) });
                     break;
                 }
@@ -154,7 +168,9 @@ pub fn detect() -> Vec<Browser> {
 /// The major version from the exe's version resource.
 #[cfg(windows)]
 fn major_version(exe: &std::path::Path) -> Option<u32> {
-    use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW};
+    use windows::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
+    };
     use windows::core::{HSTRING, w};
     let path = HSTRING::from(exe.as_os_str());
     // SAFETY: the buffer is sized by the first call; VerQueryValueW returns a
@@ -168,7 +184,10 @@ fn major_version(exe: &std::path::Path) -> Option<u32> {
         GetFileVersionInfoW(&path, None, size, buf.as_mut_ptr().cast()).ok()?;
         let mut info: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut len = 0u32;
-        if !VerQueryValueW(buf.as_ptr().cast(), w!("\\"), &mut info, &mut len).as_bool() || info.is_null() || (len as usize) < std::mem::size_of::<VS_FIXEDFILEINFO>() {
+        if !VerQueryValueW(buf.as_ptr().cast(), w!("\\"), &mut info, &mut len).as_bool()
+            || info.is_null()
+            || (len as usize) < std::mem::size_of::<VS_FIXEDFILEINFO>()
+        {
             return None;
         }
         let fixed = &*(info as *const VS_FIXEDFILEINFO);
@@ -187,8 +206,12 @@ fn major_version(_: &std::path::Path) -> Option<u32> {
 pub fn user_agent_for(kind: Kind, major: u32) -> Option<String> {
     const WIN: &str = "Windows NT 10.0; Win64; x64";
     match kind {
-        Kind::Chrome | Kind::Brave => Some(format!("Mozilla/5.0 ({WIN}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36")),
-        Kind::Edge => Some(format!("Mozilla/5.0 ({WIN}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36 Edg/{major}.0.0.0")),
+        Kind::Chrome | Kind::Brave => Some(format!(
+            "Mozilla/5.0 ({WIN}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+        )),
+        Kind::Edge => Some(format!(
+            "Mozilla/5.0 ({WIN}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36 Edg/{major}.0.0.0"
+        )),
         Kind::Firefox => Some(format!("Mozilla/5.0 ({WIN}; rv:{major}.0) Gecko/20100101 Firefox/{major}.0")),
         Kind::Opera | Kind::OperaGx | Kind::Vivaldi => None,
     }
@@ -239,10 +262,15 @@ mod tests {
     fn user_agents_match_the_browsers_own() {
         assert_eq!(
             user_agent_for(Kind::Chrome, 142).as_deref(),
-            Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
+            Some(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+            )
         );
         assert!(user_agent_for(Kind::Edge, 142).unwrap().ends_with("Safari/537.36 Edg/142.0.0.0"));
-        assert_eq!(user_agent_for(Kind::Firefox, 145).as_deref(), Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) Gecko/20100101 Firefox/145.0"));
+        assert_eq!(
+            user_agent_for(Kind::Firefox, 145).as_deref(),
+            Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) Gecko/20100101 Firefox/145.0")
+        );
         assert_eq!(user_agent_for(Kind::Vivaldi, 7), None);
     }
 

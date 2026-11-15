@@ -88,6 +88,9 @@ pub(crate) struct Inner {
     pub(crate) handle: *mut ffi::Handle,
     wakeup: Mutex<Option<Box<Callback>>>,
     // Open handlers of registered stream protocols; alive as long as the handle.
+    // The Box keeps each handler at a stable address while the Vec grows:
+    // mpv holds a raw pointer to it.
+    #[allow(clippy::vec_box)]
     protocols: Mutex<Vec<Box<crate::stream::OpenFn>>>,
 }
 
@@ -160,7 +163,9 @@ impl Mpv {
         let p = cstring(protocol);
         // SAFETY: valid handle; `data` points at the boxed handler, which is
         // stored in `Inner` below and lives as long as the handle.
-        let code = unsafe { (self.api().stream_cb_add_ro)(self.inner.handle, p.as_ptr(), data, crate::stream::open_trampoline) };
+        let code = unsafe {
+            (self.api().stream_cb_add_ro)(self.inner.handle, p.as_ptr(), data, crate::stream::open_trampoline)
+        };
         check(&self.inner.lib, code)?;
         self.inner.protocols.lock().unwrap_or_else(|p| p.into_inner()).push(boxed);
         Ok(())
@@ -238,7 +243,12 @@ impl Mpv {
         let mut out: *mut c_char = std::ptr::null_mut();
         // SAFETY: FORMAT_STRING writes a char* that we free with mpv_free.
         check(&self.inner.lib, unsafe {
-            (self.api().get_property)(self.inner.handle, n.as_ptr(), ffi::FORMAT_STRING, (&mut out as *mut *mut c_char).cast())
+            (self.api().get_property)(
+                self.inner.handle,
+                n.as_ptr(),
+                ffi::FORMAT_STRING,
+                (&mut out as *mut *mut c_char).cast(),
+            )
         })?;
         // SAFETY: on success `out` is a NUL-terminated string owned by us.
         let s = unsafe { string(out) };

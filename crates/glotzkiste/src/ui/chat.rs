@@ -4,8 +4,8 @@
 
 use crate::chat_state::BadgeMap;
 use crate::images::Images;
-use egui::{Color32, FontId, Pos2, Rect, Vec2, pos2, vec2};
 use egui::RichText;
+use egui::{Color32, FontId, Pos2, Rect, Vec2, pos2, vec2};
 use gk_chat::{ChatBuffer, ChatLine, Span};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -101,7 +101,16 @@ pub enum Action {
 
 /// A stable colour per channel for the chips of a combined chat.
 pub fn channel_color(channel: &str) -> Color32 {
-    const PALETTE: [[u8; 3]; 8] = [[34, 211, 238], [244, 114, 182], [52, 211, 153], [251, 191, 36], [167, 139, 250], [248, 113, 113], [96, 165, 250], [163, 230, 53]];
+    const PALETTE: [[u8; 3]; 8] = [
+        [34, 211, 238],
+        [244, 114, 182],
+        [52, 211, 153],
+        [251, 191, 36],
+        [167, 139, 250],
+        [248, 113, 113],
+        [96, 165, 250],
+        [163, 230, 53],
+    ];
     let h = channel.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ u32::from(b));
     let [r, g, b] = PALETTE[(h % PALETTE.len() as u32) as usize];
     Color32::from_rgb(r, g, b)
@@ -111,8 +120,16 @@ pub fn channel_color(channel: &str) -> Color32 {
 fn name_color(login: &str, color: Option<[u8; 3]>) -> Color32 {
     let [r, g, b] = color.unwrap_or_else(|| {
         const PALETTE: [[u8; 3]; 10] = [
-            [255, 99, 99], [255, 160, 70], [240, 210, 80], [120, 220, 110], [80, 210, 200],
-            [100, 170, 255], [170, 140, 255], [240, 120, 210], [200, 200, 200], [255, 140, 140],
+            [255, 99, 99],
+            [255, 160, 70],
+            [240, 210, 80],
+            [120, 220, 110],
+            [80, 210, 200],
+            [100, 170, 255],
+            [170, 140, 255],
+            [240, 120, 210],
+            [200, 200, 200],
+            [255, 140, 140],
         ];
         let h = login.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
         PALETTE[(h % PALETTE.len() as u32) as usize]
@@ -189,7 +206,8 @@ impl Flow<'_> {
                 if self.x > 0.0 {
                     self.break_row();
                 }
-                let wrapped = self.ctx.fonts_mut(|f| f.layout(visible(&s[start..end]), font.clone(), color, self.width));
+                let wrapped =
+                    self.ctx.fonts_mut(|f| f.layout(visible(&s[start..end]), font.clone(), color, self.width));
                 let sz = wrapped.size();
                 self.place(sz.x, sz.y, |x| Item::Text { pos: vec2(x, 0.0), galley: wrapped, link: link.clone() });
                 self.break_row();
@@ -206,7 +224,12 @@ impl Flow<'_> {
     }
     /// A zero-width emote stacks on the previous image in this row.
     fn overlay(&mut self, tex: egui::TextureId, size: Vec2, tip: String) -> bool {
-        let Some(base) = self.row.iter().rev().find_map(|(it, _)| if let Item::Image { rect, .. } = it { Some(*rect) } else { None }) else {
+        let Some(base) = self
+            .row
+            .iter()
+            .rev()
+            .find_map(|(it, _)| if let Item::Image { rect, .. } = it { Some(*rect) } else { None })
+        else {
             return false;
         };
         let w = if size.y > 0.0 { size.x / size.y * EMOTE_H } else { EMOTE_H };
@@ -216,7 +239,14 @@ impl Flow<'_> {
     }
 }
 
-fn layout(line: &ChatLine, tag: Option<&str>, badges: &BadgeMap, width: f32, ctx: &egui::Context, p: &mut Paint<'_>) -> Laid {
+fn layout(
+    line: &ChatLine,
+    tag: Option<&str>,
+    badges: &BadgeMap,
+    width: f32,
+    ctx: &egui::Context,
+    p: &mut Paint<'_>,
+) -> Laid {
     let mut f = Flow { width, x: 0.0, row_top: 0.0, row: Vec::new(), out: Vec::new(), ctx };
     let mut complete = true;
     let m = &line.msg;
@@ -242,7 +272,8 @@ fn layout(line: &ChatLine, tag: Option<&str>, badges: &BadgeMap, width: f32, ctx
     }
     if !m.login.is_empty() {
         for (set, ver) in &m.badges {
-            let url = badges.get(&(set.clone(), ver.clone())).or_else(|| p.global_badges.get(&(set.clone(), ver.clone())));
+            let url =
+                badges.get(&(set.clone(), ver.clone())).or_else(|| p.global_badges.get(&(set.clone(), ver.clone())));
             if let Some(url) = url {
                 match p.images.get(url) {
                     Some(img) => f.image(img.texture_id(), img.size(), BADGE_H, set.clone()),
@@ -250,7 +281,11 @@ fn layout(line: &ChatLine, tag: Option<&str>, badges: &BadgeMap, width: f32, ctx
                 }
             }
         }
-        let name = if m.display_name.eq_ignore_ascii_case(&m.login) { m.display_name.clone() } else { format!("{} ({})", m.display_name, m.login) };
+        let name = if m.display_name.eq_ignore_ascii_case(&m.login) {
+            m.display_name.clone()
+        } else {
+            format!("{} ({})", m.display_name, m.login)
+        };
         let nc = dim(name_color(&m.login, m.color));
         f.text(&name, crate::fonts::bold(FONT), nc, None);
         f.text(if m.action { " " } else { ": " }, font.clone(), text_color, None);
@@ -293,7 +328,15 @@ fn layout(line: &ChatLine, tag: Option<&str>, badges: &BadgeMap, width: f32, ctx
 
 impl ChatView {
     #[allow(clippy::too_many_arguments)]
-    fn laid<'a>(&'a mut self, line: &ChatLine, tag: Option<&str>, badges: &BadgeMap, width: f32, ctx: &egui::Context, p: &mut Paint<'_>) -> &'a Laid {
+    fn laid<'a>(
+        &'a mut self,
+        line: &ChatLine,
+        tag: Option<&str>,
+        badges: &BadgeMap,
+        width: f32,
+        ctx: &egui::Context,
+        p: &mut Paint<'_>,
+    ) -> &'a Laid {
         let stale = match self.cache.get(&line.seq) {
             None => true,
             Some(l) => !l.complete && l.images_gen != p.images.generation,
@@ -306,7 +349,14 @@ impl ChatView {
     }
 
     /// Draws the messages and the input line inside `rect`.
-    pub fn show(&mut self, ui: &mut egui::Ui, rect: Rect, src: &Source<'_>, can_send: bool, p: &mut Paint<'_>) -> Action {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        src: &Source<'_>,
+        can_send: bool,
+        p: &mut Paint<'_>,
+    ) -> Action {
         let mut action = Action::None;
         let ctx = ui.ctx().clone();
         let input_h = 34.0;
@@ -376,10 +426,10 @@ impl ChatView {
                     Item::Text { pos, galley, link } => {
                         let at = origin + *pos;
                         painter.galley(at, galley.clone(), Color32::WHITE);
-                        if let (Some(u), Some(pt)) = (link, pointer) {
-                            if Rect::from_min_size(at, galley.size()).contains(pt) {
-                                hover_link = Some(u.clone());
-                            }
+                        if let (Some(u), Some(pt)) = (link, pointer)
+                            && Rect::from_min_size(at, galley.size()).contains(pt)
+                        {
+                            hover_link = Some(u.clone());
                         }
                     }
                     Item::Image { rect, tex, tip } => {
@@ -403,7 +453,13 @@ impl ChatView {
         }
         if resp.hovered() {
             if let Some(t) = hover_tip {
-                egui::Tooltip::always_open(ctx.clone(), ui.layer_id(), ui.scope_id().with("emote-tip"), egui::PopupAnchor::Pointer).show(|ui| {
+                egui::Tooltip::always_open(
+                    ctx.clone(),
+                    ui.layer_id(),
+                    ui.scope_id().with("emote-tip"),
+                    egui::PopupAnchor::Pointer,
+                )
+                .show(|ui| {
                     ui.label(t);
                 });
             }
@@ -428,7 +484,8 @@ impl ChatView {
             }
         }
         // Input line; a combined chat picks the channel to write to.
-        let mut input = Rect::from_min_max(pos2(rect.min.x + 6.0, list.max.y + 4.0), pos2(rect.max.x - 6.0, rect.max.y - 4.0));
+        let mut input =
+            Rect::from_min_max(pos2(rect.min.x + 6.0, list.max.y + 4.0), pos2(rect.max.x - 6.0, rect.max.y - 4.0));
         let names: Vec<&str> = src.channels.iter().map(|(c, _, _)| *c).collect();
         if self.target.as_deref().is_none_or(|t| !names.contains(&t)) {
             self.target = names.first().map(|c| (*c).to_owned());
@@ -438,20 +495,26 @@ impl ChatView {
             input.min.x = picker.max.x + 6.0;
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(picker));
             let current = self.target.clone().unwrap_or_default();
-            egui::ComboBox::from_id_salt(ui.scope_id().with("send-target")).selected_text(RichText::new(format!("→ {current}")).color(channel_color(&current))).width(110.0).show_ui(&mut child, |ui| {
-                for c in &names {
-                    if ui.selectable_label(current == *c, RichText::new(*c).color(channel_color(c))).clicked() {
-                        self.target = Some((*c).to_owned());
+            egui::ComboBox::from_id_salt(ui.scope_id().with("send-target"))
+                .selected_text(RichText::new(format!("→ {current}")).color(channel_color(&current)))
+                .width(110.0)
+                .show_ui(&mut child, |ui| {
+                    for c in &names {
+                        if ui.selectable_label(current == *c, RichText::new(*c).color(channel_color(c))).clicked() {
+                            self.target = Some((*c).to_owned());
+                        }
                     }
-                }
-            });
+                });
         }
         if can_send {
             let hint = match (&self.target, names.len()) {
                 (Some(t), n) if n > 1 => format!("Send to {t}"),
                 _ => "Send a message".to_owned(),
             };
-            let te = egui::TextEdit::singleline(&mut self.input).hint_text(hint).char_limit(500).desired_width(input.width());
+            let te = egui::TextEdit::singleline(&mut self.input)
+                .hint_text(hint)
+                .char_limit(500)
+                .desired_width(input.width());
             let r = ui.put(input, te);
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let text = std::mem::take(&mut self.input);

@@ -98,7 +98,9 @@ pub fn random_hex(len: usize) -> String {
     while out.len() < len {
         let mut h = RandomState::new().build_hasher();
         h.write_u64(counter);
-        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        h.write_u128(
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0),
+        );
         out.push_str(&format!("{:016x}", h.finish()));
         counter += 1;
     }

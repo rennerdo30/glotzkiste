@@ -216,17 +216,18 @@ impl Tab {
                 }
             }
         }
-        if let Some((_, cid)) = best {
-            if let Some(Tile::Container(c)) = tiles.get_mut(cid) {
-                if c.kind() == ContainerKind::Horizontal && c.num_children() >= 2 {
-                    c.set_kind(ContainerKind::Grid);
-                }
-                c.add_child(new);
-                return;
+        if let Some((_, cid)) = best
+            && let Some(Tile::Container(c)) = tiles.get_mut(cid)
+        {
+            if c.kind() == ContainerKind::Horizontal && c.num_children() >= 2 {
+                c.set_kind(ContainerKind::Grid);
             }
+            c.add_child(new);
+            return;
         }
         // A single stream (maybe with a chat): group it with the new one.
-        let first_stream = tiles.iter().find_map(|(id, t)| (matches!(t, Tile::Pane(Pane::Stream(_))) && *id != new).then_some(*id));
+        let first_stream =
+            tiles.iter().find_map(|(id, t)| (matches!(t, Tile::Pane(Pane::Stream(_))) && *id != new).then_some(*id));
         match first_stream {
             Some(s) => self.split(s, new, ContainerKind::Grid),
             None => {

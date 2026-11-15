@@ -2,14 +2,21 @@
 //! through the stream callback API; prints buffer and speed once a second.
 //! `cargo run -p glotzkiste --example latency_probe [login] [secs]`
 use gk_mpv::{Format, Libmpv, Mpv, StreamReader, Value};
-use gk_twitch::{Client, Http, live::{FeedReader, LiveFeed}};
+use gk_twitch::{
+    Client, Http,
+    live::{FeedReader, LiveFeed},
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 struct R(FeedReader);
 impl StreamReader for R {
-    fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> { self.0.read(buf) }
-    fn cancel(&self) { self.0.cancel() }
+    fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+    fn cancel(&self) {
+        self.0.cancel()
+    }
 }
 
 fn main() {
@@ -28,13 +35,24 @@ fn main() {
     let feed = Arc::new(LiveFeed::start(http, pb.variants, idx, Arc::new(|| {})));
 
     let mpv = Mpv::create(lib).expect("create");
-    for (k, v) in [("vo", "null"), ("ao", "null"), ("profile", "low-latency"), ("demuxer-lavf-format", "mpegts"),
-                   ("cache", "yes"), ("demuxer-max-bytes", "32MiB"), ("audio-buffer", "0.1"), ("terminal", "no")] {
-        if let Err(e) = mpv.set_option(k, v) { println!("option {k}: {e}"); }
+    for (k, v) in [
+        ("vo", "null"),
+        ("ao", "null"),
+        ("profile", "low-latency"),
+        ("demuxer-lavf-format", "mpegts"),
+        ("cache", "yes"),
+        ("demuxer-max-bytes", "32MiB"),
+        ("audio-buffer", "0.1"),
+        ("terminal", "no"),
+    ] {
+        if let Err(e) = mpv.set_option(k, v) {
+            println!("option {k}: {e}");
+        }
     }
     mpv.initialize().expect("init");
     let f2 = feed.clone();
-    mpv.add_stream_protocol("gkfeed", Box::new(move |_uri| Some(Arc::new(R(f2.reader())) as Arc<dyn StreamReader>))).expect("proto");
+    mpv.add_stream_protocol("gkfeed", Box::new(move |_uri| Some(Arc::new(R(f2.reader())) as Arc<dyn StreamReader>)))
+        .expect("proto");
     mpv.observe(1, "demuxer-cache-duration", Format::Double).ok();
     mpv.observe(2, "frame-drop-count", Format::Int64).ok();
     mpv.observe(3, "video-params/h", Format::Int64).ok();
@@ -48,18 +66,45 @@ fn main() {
             match ev {
                 gk_mpv::Event::PropertyChange { id: 1, value: Value::Double(d), .. } => cache = d,
                 gk_mpv::Event::PropertyChange { id: 2, value: Value::Int64(d), .. } => drops = d,
-                gk_mpv::Event::PropertyChange { id: 3, value: Value::Int64(d), .. } => { h = d; if first_frame.is_none() { first_frame = Some(t0.elapsed()); } }
-                gk_mpv::Event::EndFile { reason, error } => { println!("end {reason:?} {error:?}"); return; }
+                gk_mpv::Event::PropertyChange { id: 3, value: Value::Int64(d), .. } => {
+                    h = d;
+                    if first_frame.is_none() {
+                        first_frame = Some(t0.elapsed());
+                    }
+                }
+                gk_mpv::Event::EndFile { reason, error } => {
+                    println!("end {reason:?} {error:?}");
+                    return;
+                }
                 _ => {}
             }
         }
         let total = cache + feed.buffered_secs();
-        let want = if total > target + 1.5 { 1.25 } else if total > target + 0.4 { 1.08 } else if total < target - 0.4 { 0.97 } else { 1.0 };
-        if (want - speed) .abs() > 1e-3 { speed = want; mpv.command(&["set", "speed", &format!("{speed}")]).ok(); }
+        let want = if total > target + 1.5 {
+            1.25
+        } else if total > target + 0.4 {
+            1.08
+        } else if total < target - 0.4 {
+            0.97
+        } else {
+            1.0
+        };
+        if (want - speed).abs() > 1e-3 {
+            speed = want;
+            mpv.command(&["set", "speed", &format!("{speed}")]).ok();
+        }
         if last_print.elapsed() >= Duration::from_secs(2) {
             last_print = Instant::now();
             let st = feed.status();
-            println!("t={:>5.1}s h={h} demux={cache:.2}s pipe={:.2}s speed={speed} drops={drops} ll={} ad={} seg={}/{}", t0.elapsed().as_secs_f64(), feed.buffered_secs(), st.low_latency, st.in_ad, st.segments_done, st.segments_skipped);
+            println!(
+                "t={:>5.1}s h={h} demux={cache:.2}s pipe={:.2}s speed={speed} drops={drops} ll={} ad={} seg={}/{}",
+                t0.elapsed().as_secs_f64(),
+                feed.buffered_secs(),
+                st.low_latency,
+                st.in_ad,
+                st.segments_done,
+                st.segments_skipped
+            );
         }
     }
     println!("first video params after {:?}", first_frame);

@@ -127,7 +127,10 @@ impl RenderContext {
     /// not timed (a redraw), which is drawn at once.
     pub fn next_frame(&mut self) -> NextFrame {
         let mut info = ffi::FrameInfo::default();
-        let param = ffi::RenderParam { kind: ffi::RENDER_PARAM_NEXT_FRAME_INFO, data: (&mut info as *mut ffi::FrameInfo).cast() };
+        let param = ffi::RenderParam {
+            kind: ffi::RENDER_PARAM_NEXT_FRAME_INFO,
+            data: (&mut info as *mut ffi::FrameInfo).cast(),
+        };
         // SAFETY: valid context; `info` matches mpv_render_frame_info.
         let code = unsafe { (self.mpv.lib.api.render_context_get_info)(self.ctx, param) };
         if code < 0 || info.flags & ffi::FRAME_INFO_PRESENT == 0 {

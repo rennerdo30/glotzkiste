@@ -19,7 +19,11 @@ pub type OpenFn = Box<dyn Fn(&str) -> Option<Arc<dyn StreamReader>> + Send + Syn
 
 type Cookie = Arc<dyn StreamReader>;
 
-pub(crate) unsafe extern "C" fn open_trampoline(user: *mut c_void, uri: *mut c_char, info: *mut ffi::StreamCbInfo) -> c_int {
+pub(crate) unsafe extern "C" fn open_trampoline(
+    user: *mut c_void,
+    uri: *mut c_char,
+    info: *mut ffi::StreamCbInfo,
+) -> c_int {
     let result = std::panic::catch_unwind(|| {
         if user.is_null() || uri.is_null() || info.is_null() {
             return ffi::ERROR_LOADING_FAILED;

@@ -18,7 +18,8 @@ const CANDIDATES: &[(&str, &str, u32)] = &[
 ];
 
 pub fn load() -> Option<egui::FontDefinitions> {
-    let dir = std::env::var_os("WINDIR").map(|w| std::path::PathBuf::from(w).join("Fonts")).unwrap_or_else(|| DIR.into());
+    let dir =
+        std::env::var_os("WINDIR").map(|w| std::path::PathBuf::from(w).join("Fonts")).unwrap_or_else(|| DIR.into());
     let mut defs = egui::FontDefinitions::default();
     let mut regular = Vec::new();
     let mut bold = None;

@@ -39,6 +39,8 @@ Usage: glotzkiste [options] [CHANNEL...]
   --state-dir DIR   Keep the saved layout in DIR (smoke runs save only then)
 
 Channels on the command line open in a new tab next to the restored ones.
+  --version         Print the version
+  --mpv-info        Load libmpv and print what was loaded (for the setup test)
   --help            This text
 ";
 
@@ -63,6 +65,20 @@ fn parse(args: &[String]) -> Result<Option<Options>, String> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--help" | "-h" => return Ok(None),
+            "--version" => {
+                println!("glotzkiste {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "--mpv-info" => match libmpv::load() {
+                Ok(lib) => {
+                    println!("libmpv {} from {}", lib.api_version(), lib.path());
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    println!("libmpv failed: {e}");
+                    std::process::exit(1);
+                }
+            },
             "--mute" => o.mute = true,
             "--chat" => o.chat = true,
             "--chat-all" => o.chat_all = true,
@@ -70,7 +86,10 @@ fn parse(args: &[String]) -> Result<Option<Options>, String> {
             "--login" => o.login = true,
             "--smoke" => {
                 o.smoke = Some(
-                    it.next().and_then(|s| s.parse::<f64>().ok()).filter(|s| *s > 0.0 && *s <= 600.0).ok_or("--smoke needs seconds (up to 600)")?,
+                    it.next()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .filter(|s| *s > 0.0 && *s <= 600.0)
+                        .ok_or("--smoke needs seconds (up to 600)")?,
                 )
             }
             "--pointer" => {
@@ -87,7 +106,12 @@ fn parse(args: &[String]) -> Result<Option<Options>, String> {
             }
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             s => {
-                let login = s.trim().trim_start_matches("https://").trim_start_matches("www.").trim_start_matches("twitch.tv/").to_ascii_lowercase();
+                let login = s
+                    .trim()
+                    .trim_start_matches("https://")
+                    .trim_start_matches("www.")
+                    .trim_start_matches("twitch.tv/")
+                    .to_ascii_lowercase();
                 if !gk_twitch::api::valid_login(&login) {
                     return Err(format!("{s} is not a channel name"));
                 }

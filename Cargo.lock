@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "gk-chat"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "log",
  "rustls",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "gk-icon"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ico",
  "resvg",
@@ -920,14 +920,14 @@ dependencies = [
 
 [[package]]
 name = "gk-mpv"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "libloading 0.9.1",
 ]
 
 [[package]]
 name = "gk-render"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "egui",
  "gk-mpv",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "gk-twitch"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "image",
  "log",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "gk-update"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde_json",
  "sha2",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "glotzkiste"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "egui",
  "egui-winit",

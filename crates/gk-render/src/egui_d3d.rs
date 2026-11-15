@@ -6,11 +6,11 @@
 use egui::epaint::Primitive;
 use egui::{ClippedPrimitive, TextureId};
 use std::collections::HashMap;
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::Win32::Foundation::RECT;
 use windows::core::{PCSTR, s};
 
 const SHADER: &str = r#"
@@ -34,13 +34,28 @@ pub(crate) fn compile(src: &str, entry: PCSTR, target: PCSTR) -> Result<Vec<u8>,
     let mut errors = None;
     // SAFETY: source pointer/length describe `src`; outputs are locals.
     let result = unsafe {
-        D3DCompile(src.as_ptr().cast(), src.len(), s!("gk"), None, None, entry, target, 0, 0, &mut blob, Some(&mut errors))
+        D3DCompile(
+            src.as_ptr().cast(),
+            src.len(),
+            s!("gk"),
+            None,
+            None,
+            entry,
+            target,
+            0,
+            0,
+            &mut blob,
+            Some(&mut errors),
+        )
     };
     if let Err(e) = result {
         let detail = errors
             .map(|b: ID3DBlob| unsafe {
-                String::from_utf8_lossy(std::slice::from_raw_parts(b.GetBufferPointer() as *const u8, b.GetBufferSize()))
-                    .into_owned()
+                String::from_utf8_lossy(std::slice::from_raw_parts(
+                    b.GetBufferPointer() as *const u8,
+                    b.GetBufferSize(),
+                ))
+                .into_owned()
             })
             .unwrap_or_default();
         return Err(format!("shader compile failed: {e} {detail}"));
@@ -201,7 +216,8 @@ impl EguiRenderer {
                 if w == 0 || h == 0 {
                     continue;
                 }
-                let bytes: &[u8] = unsafe { std::slice::from_raw_parts(img.pixels.as_ptr().cast::<u8>(), img.pixels.len() * 4) };
+                let bytes: &[u8] =
+                    unsafe { std::slice::from_raw_parts(img.pixels.as_ptr().cast::<u8>(), img.pixels.len() * 4) };
                 match d.pos {
                     None => {
                         let reuse = self.textures.get(id).is_some_and(|t| t.size == img.size);
@@ -219,7 +235,9 @@ impl EguiRenderer {
                         if let Some(t) = self.textures.get_mut(id) {
                             t.nearest = nearest;
                             // SAFETY: the texture is w x h RGBA8; `bytes` has that size.
-                            unsafe { ctx.UpdateSubresource(&t.texture, 0, None, bytes.as_ptr().cast(), (w * 4) as u32, 0) };
+                            unsafe {
+                                ctx.UpdateSubresource(&t.texture, 0, None, bytes.as_ptr().cast(), (w * 4) as u32, 0)
+                            };
                         }
                     }
                     Some([x, y]) => {
@@ -227,9 +245,18 @@ impl EguiRenderer {
                             if x + w > t.size[0] || y + h > t.size[1] {
                                 continue;
                             }
-                            let b = D3D11_BOX { left: x as u32, top: y as u32, front: 0, right: (x + w) as u32, bottom: (y + h) as u32, back: 1 };
+                            let b = D3D11_BOX {
+                                left: x as u32,
+                                top: y as u32,
+                                front: 0,
+                                right: (x + w) as u32,
+                                bottom: (y + h) as u32,
+                                back: 1,
+                            };
                             // SAFETY: the box lies inside the texture; data is w x h RGBA8.
-                            unsafe { ctx.UpdateSubresource(&t.texture, 0, Some(&b), bytes.as_ptr().cast(), (w * 4) as u32, 0) };
+                            unsafe {
+                                ctx.UpdateSubresource(&t.texture, 0, Some(&b), bytes.as_ptr().cast(), (w * 4) as u32, 0)
+                            };
                         }
                     }
                 }
@@ -265,7 +292,12 @@ impl EguiRenderer {
         if nv == 0 || ni == 0 {
             return Ok(());
         }
-        let vb = ensure_buffer(device, &mut self.vb, nv * std::mem::size_of::<egui::epaint::Vertex>(), D3D11_BIND_VERTEX_BUFFER)?;
+        let vb = ensure_buffer(
+            device,
+            &mut self.vb,
+            nv * std::mem::size_of::<egui::epaint::Vertex>(),
+            D3D11_BIND_VERTEX_BUFFER,
+        )?;
         let ib = ensure_buffer(device, &mut self.ib, ni * 4, D3D11_BIND_INDEX_BUFFER)?;
         let e = |e: windows::core::Error| e.to_string();
         // SAFETY: both buffers are dynamic, mapped with WRITE_DISCARD, and at
@@ -285,7 +317,11 @@ impl EguiRenderer {
                 if m.indices.is_empty() {
                     continue;
                 }
-                std::ptr::copy_nonoverlapping(m.vertices.as_ptr(), (vm.pData as *mut egui::epaint::Vertex).add(vo), m.vertices.len());
+                std::ptr::copy_nonoverlapping(
+                    m.vertices.as_ptr(),
+                    (vm.pData as *mut egui::epaint::Vertex).add(vo),
+                    m.vertices.len(),
+                );
                 std::ptr::copy_nonoverlapping(m.indices.as_ptr(), (im.pData as *mut u32).add(io), m.indices.len());
                 let c = p.clip_rect;
                 let scissor = RECT {
@@ -295,10 +331,10 @@ impl EguiRenderer {
                     bottom: (c.max.y * ppp).round().clamp(0.0, h) as i32,
                 };
                 if scissor.right > scissor.left && scissor.bottom > scissor.top {
-                    if let TextureId::User(u) = m.texture_id {
-                        if !self.user_ids.contains(&u) {
-                            self.user_ids.push(u);
-                        }
+                    if let TextureId::User(u) = m.texture_id
+                        && !self.user_ids.contains(&u)
+                    {
+                        self.user_ids.push(u);
                     }
                     self.draws.push(Draw {
                         texture: m.texture_id,
@@ -334,7 +370,11 @@ impl EguiRenderer {
         unsafe {
             let mut m = D3D11_MAPPED_SUBRESOURCE::default();
             ctx.Map(&self.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut m)).map_err(|e| e.to_string())?;
-            std::ptr::copy_nonoverlapping([self.screen_points[0], self.screen_points[1], 0.0, 0.0].as_ptr(), m.pData.cast::<f32>(), 4);
+            std::ptr::copy_nonoverlapping(
+                [self.screen_points[0], self.screen_points[1], 0.0, 0.0].as_ptr(),
+                m.pData.cast::<f32>(),
+                4,
+            );
             ctx.Unmap(&self.constants, 0);
 
             ctx.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
@@ -389,10 +429,10 @@ fn ensure_buffer(
     bytes: usize,
     bind: D3D11_BIND_FLAG,
 ) -> Result<ID3D11Buffer, String> {
-    if let Some((b, cap)) = slot {
-        if *cap >= bytes {
-            return Ok(b.clone());
-        }
+    if let Some((b, cap)) = slot
+        && *cap >= bytes
+    {
+        return Ok(b.clone());
     }
     // Grow geometrically so a growing chat doesn't reallocate every frame.
     let cap = bytes.next_power_of_two().max(64 * 1024);
@@ -412,7 +452,11 @@ fn ensure_buffer(
 }
 
 /// An RGBA8 shader-resource texture.
-pub(crate) fn create_texture(device: &ID3D11Device, w: u32, h: u32) -> windows::core::Result<(ID3D11Texture2D, ID3D11ShaderResourceView)> {
+pub(crate) fn create_texture(
+    device: &ID3D11Device,
+    w: u32,
+    h: u32,
+) -> windows::core::Result<(ID3D11Texture2D, ID3D11ShaderResourceView)> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: w,
         Height: h,

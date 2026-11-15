@@ -78,7 +78,12 @@ pub struct ChatState {
 }
 
 impl ChatState {
-    pub fn new(credentials: Option<Credentials>, pool: Pool, api: Arc<Mutex<Client>>, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+    pub fn new(
+        credentials: Option<Credentials>,
+        pool: Pool,
+        api: Arc<Mutex<Client>>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         let queue: Arc<Mutex<Vec<ChatEvent>>> = Arc::default();
         let client = {
             let (queue, wake) = (queue.clone(), wake.clone());
@@ -102,10 +107,10 @@ impl ChatState {
             pool.spawn(move || {
                 let client = api.lock().map(|c| c.clone()).ok();
                 let Some(client) = client else { return };
-                if let Ok(list) = gk_twitch::emotes::global(client.http()) {
-                    if let Ok(mut l) = loaded.lock() {
-                        l.push(Loaded::GlobalEmotes(to_map(list)));
-                    }
+                if let Ok(list) = gk_twitch::emotes::global(client.http())
+                    && let Ok(mut l) = loaded.lock()
+                {
+                    l.push(Loaded::GlobalEmotes(to_map(list)));
                 }
                 if let Ok(b) = client.badges(None) {
                     let map: BadgeMap = b.into_iter().map(|b| ((b.set, b.version), b.url)).collect();
@@ -168,7 +173,8 @@ impl ChatState {
             return;
         }
         ch.emotes_requested = true;
-        let (room, channel, loaded, api, wake) = (ch.room_id.clone(), channel.to_owned(), self.loaded.clone(), self.api.clone(), self.wake.clone());
+        let (room, channel, loaded, api, wake) =
+            (ch.room_id.clone(), channel.to_owned(), self.loaded.clone(), self.api.clone(), self.wake.clone());
         self.pool.spawn(move || {
             let Some(client) = api.lock().map(|c| c.clone()).ok() else { return };
             let emotes = gk_twitch::emotes::channel(client.http(), &room).map(to_map).unwrap_or_default();
@@ -271,7 +277,8 @@ impl ChatState {
                     }
                 }
                 ChatEvent::Notice { channel, text } => {
-                    let targets: Vec<String> = if channel.is_empty() { self.channels.keys().cloned().collect() } else { vec![channel] };
+                    let targets: Vec<String> =
+                        if channel.is_empty() { self.channels.keys().cloned().collect() } else { vec![channel] };
                     for c in targets {
                         if let Some(ch) = self.channels.get_mut(&c) {
                             let msg = ChatMessage { channel: c.clone(), ..Default::default() };

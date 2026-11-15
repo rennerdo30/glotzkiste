@@ -87,7 +87,11 @@ impl Presenter {
     /// Starts the render thread for `hwnd` and waits until its device and
     /// swap chain exist (or failed).
     pub fn start(hwnd: isize, size: (u32, u32)) -> Result<(Self, DeviceInfo), String> {
-        let shared = Arc::new(Shared { requests: Mutex::new(Requests::default()), wake: Condvar::new(), video_dirty: AtomicBool::new(false) });
+        let shared = Arc::new(Shared {
+            requests: Mutex::new(Requests::default()),
+            wake: Condvar::new(),
+            video_dirty: AtomicBool::new(false),
+        });
         let stats = Arc::new(Stats::default());
         let (tx, rx) = mpsc::channel();
         let thread = {
@@ -99,7 +103,9 @@ impl Presenter {
                     match Renderer::new(hwnd, size, shared.clone()) {
                         Ok((renderer, info)) => {
                             let _ = tx.send(Ok(info));
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| renderer.run(&shared, &stats)));
+                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                renderer.run(&shared, &stats)
+                            }));
                             if r.is_err() {
                                 log::error!("render thread panicked");
                             }
@@ -276,7 +282,17 @@ fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, bool), String> 
         let (mut device, mut context) = (None, None);
         // SAFETY: out pointers are valid locals.
         let r = unsafe {
-            D3D11CreateDevice(None, driver, HMODULE::default(), flags, Some(&levels), D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context))
+            D3D11CreateDevice(
+                None,
+                driver,
+                HMODULE::default(),
+                flags,
+                Some(&levels),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
         };
         match (r, device, context) {
             (Ok(()), Some(d), Some(c)) => return Ok((d, c, software)),
@@ -339,7 +355,11 @@ impl Renderer {
                     epoch: Instant::now(),
                     shared,
                 },
-                DeviceInfo { adapter: adapter_name, software, luid: (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart) },
+                DeviceInfo {
+                    adapter: adapter_name,
+                    software,
+                    luid: (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart),
+                },
             ))
         }
     }
@@ -458,7 +478,9 @@ impl Renderer {
             }
             self.egui.set_textures(&self.device, &self.context, &delta);
             if let Some(ui) = ui_frame.take() {
-                if let Err(e) = self.egui.upload(&self.device, &self.context, &ui.primitives, ui.pixels_per_point, self.size) {
+                if let Err(e) =
+                    self.egui.upload(&self.device, &self.context, &ui.primitives, ui.pixels_per_point, self.size)
+                {
                     log::error!("ui upload: {e}");
                 }
                 self.videos = ui.videos;
@@ -516,7 +538,18 @@ impl Renderer {
             Ok(mut render) => {
                 let shared = self.shared.clone();
                 render.set_update_callback(move || shared.poke_video());
-                self.surfaces.insert(id, Surface { render, tex: None, has_frame: false, pending: true, pending_kind: FrameKind::None, due_ns: None, fresh: false });
+                self.surfaces.insert(
+                    id,
+                    Surface {
+                        render,
+                        tex: None,
+                        has_frame: false,
+                        pending: true,
+                        pending_kind: FrameKind::None,
+                        due_ns: None,
+                        fresh: false,
+                    },
+                );
                 self.shared.video_dirty.store(true, Ordering::Release);
             }
             Err(e) => log::error!("stream {id}: render context failed: {e}"),
@@ -687,7 +720,7 @@ fn merge(into: &mut Requests, more: Requests) {
 
 fn premultiply(rgba: &[u8]) -> Vec<u8> {
     let mut out = rgba.to_vec();
-    for px in out.chunks_exact_mut(4) {
+    for px in out.as_chunks_mut::<4>().0 {
         let a = u16::from(px[3]);
         for c in &mut px[..3] {
             *c = ((u16::from(*c) * a + 127) / 255) as u8;
@@ -697,7 +730,10 @@ fn premultiply(rgba: &[u8]) -> Vec<u8> {
 }
 
 /// A texture mpv renders into and egui samples from.
-fn create_target(device: &ID3D11Device, (w, h): (u32, u32)) -> windows::core::Result<(ID3D11Texture2D, ID3D11ShaderResourceView)> {
+fn create_target(
+    device: &ID3D11Device,
+    (w, h): (u32, u32),
+) -> windows::core::Result<(ID3D11Texture2D, ID3D11ShaderResourceView)> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: w,
         Height: h,
@@ -720,7 +756,12 @@ fn create_target(device: &ID3D11Device, (w, h): (u32, u32)) -> windows::core::Re
 }
 
 /// Copies the back buffer to a CPU-readable texture and writes a PNG.
-fn write_snapshot(device: &ID3D11Device, ctx: &ID3D11DeviceContext, tex: &ID3D11Texture2D, path: &std::path::Path) -> Result<(), String> {
+fn write_snapshot(
+    device: &ID3D11Device,
+    ctx: &ID3D11DeviceContext,
+    tex: &ID3D11Texture2D,
+    path: &std::path::Path,
+) -> Result<(), String> {
     let e = |e: windows::core::Error| e.to_string();
     // SAFETY: a staging copy of a texture on this device, mapped for read and
     // unmapped before returning.
@@ -739,8 +780,11 @@ fn write_snapshot(device: &ID3D11Device, ctx: &ID3D11DeviceContext, tex: &ID3D11
         ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut m)).map_err(e)?;
         let mut pixels = Vec::with_capacity((desc.Width * desc.Height * 4) as usize);
         for y in 0..desc.Height as usize {
-            let row = std::slice::from_raw_parts((m.pData as *const u8).add(y * m.RowPitch as usize), desc.Width as usize * 4);
-            for px in row.chunks_exact(4) {
+            let row = std::slice::from_raw_parts(
+                (m.pData as *const u8).add(y * m.RowPitch as usize),
+                desc.Width as usize * 4,
+            );
+            for px in row.as_chunks::<4>().0 {
                 pixels.extend_from_slice(&[px[2], px[1], px[0], 255]);
             }
         }

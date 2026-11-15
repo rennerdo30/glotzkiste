@@ -96,11 +96,20 @@ pub fn tokenize(msg: &ChatMessage, lookup: &dyn EmoteLookup, me: &str) -> Vec<Sp
     let mut out = Vec::new();
     let mut pos = 0;
     for (id, r) in &msg.twitch_emotes {
-        if r.start < pos || r.end > msg.text.len() || !msg.text.is_char_boundary(r.start) || !msg.text.is_char_boundary(r.end) {
+        if r.start < pos
+            || r.end > msg.text.len()
+            || !msg.text.is_char_boundary(r.start)
+            || !msg.text.is_char_boundary(r.end)
+        {
             continue;
         }
         words(&mut out, &msg.text[pos..r.start], lookup, me);
-        out.push(Span::Emote { name: msg.text[r.clone()].to_owned(), url: twitch_emote_url(id), animated: false, zero_width: false });
+        out.push(Span::Emote {
+            name: msg.text[r.clone()].to_owned(),
+            url: twitch_emote_url(id),
+            animated: false,
+            zero_width: false,
+        });
         pos = r.end;
     }
     words(&mut out, &msg.text[pos..], lookup, me);

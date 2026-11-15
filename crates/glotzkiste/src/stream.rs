@@ -292,7 +292,8 @@ impl Control {
         if now == self.posted {
             return;
         }
-        let only_buffer = Status { buffer_tenths: self.posted.buffer_tenths, drops: self.posted.drops, ..now.clone() } == self.posted;
+        let only_buffer =
+            Status { buffer_tenths: self.posted.buffer_tenths, drops: self.posted.drops, ..now.clone() } == self.posted;
         if only_buffer && !force && self.last_post.elapsed() < Duration::from_millis(500) {
             return;
         }
@@ -447,7 +448,8 @@ impl Control {
     fn pick(&self, variants: &[Variant], tile_height: u32) -> usize {
         match &self.settings.quality {
             Quality::Named(n) => variants.iter().position(|v| &v.name == n),
-            Quality::Auto => pick_for_height(variants, tile_height.max(1)).and_then(|p| variants.iter().position(|v| v.name == p.name)),
+            Quality::Auto => pick_for_height(variants, tile_height.max(1))
+                .and_then(|p| variants.iter().position(|v| v.name == p.name)),
         }
         .unwrap_or(0)
     }
@@ -573,7 +575,9 @@ impl Control {
                         ended = true
                     }
                     Event::Shutdown => return Ok(Next::Stop),
-                    Event::Log { prefix, level, text } => log::warn!("stream {} mpv[{prefix}] {level}: {}", self.channel, text.trim_end()),
+                    Event::Log { prefix, level, text } => {
+                        log::warn!("stream {} mpv[{prefix}] {level}: {}", self.channel, text.trim_end())
+                    }
                     _ => {}
                 }
             }
@@ -646,11 +650,17 @@ impl Control {
                 let variants = feed.variants();
                 let cur = variants.get(st.variant).map(|v| v.name.clone()).unwrap_or_default();
                 let tenths = (behind * 10.0).round().clamp(0.0, 999.0) as u32;
-                if STATS_ON.load(Ordering::Relaxed) && last_sample.is_none_or(|(t, _)| t.elapsed() >= Duration::from_millis(500)) {
+                if STATS_ON.load(Ordering::Relaxed)
+                    && last_sample.is_none_or(|(t, _)| t.elapsed() >= Duration::from_millis(500))
+                {
                     let now = Instant::now();
                     let bytes = feed.bytes_received();
                     let download_kbps = match last_sample {
-                        Some((t, b)) => (bytes.saturating_sub(b)) as f64 * 8.0 / 1000.0 / now.duration_since(t).as_secs_f64().max(0.001),
+                        Some((t, b)) => {
+                            (bytes.saturating_sub(b)) as f64 * 8.0
+                                / 1000.0
+                                / now.duration_since(t).as_secs_f64().max(0.001)
+                        }
                         None => 0.0,
                     };
                     last_sample = Some((now, bytes));
@@ -661,9 +671,9 @@ impl Control {
                         decoded_fps: d("estimated-vf-fps"),
                         // Low-latency probing often leaves the container rate
                         // unknown; the playlist states it.
-                        source_fps: Some(d("container-fps")).filter(|f| *f > 0.0).unwrap_or_else(|| {
-                            variants.get(st.variant).map(|v| f64::from(v.fps)).unwrap_or(0.0)
-                        }),
+                        source_fps: Some(d("container-fps"))
+                            .filter(|f| *f > 0.0)
+                            .unwrap_or_else(|| variants.get(st.variant).map(|v| f64::from(v.fps)).unwrap_or(0.0)),
                         drops_vo: i("frame-drop-count"),
                         drops_decoder: i("decoder-frame-drop-count"),
                         delayed: i("vo-delayed-frame-count"),

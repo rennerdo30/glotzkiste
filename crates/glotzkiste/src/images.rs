@@ -61,7 +61,17 @@ impl Images {
     pub fn new(pool: Pool, http: Http, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         let p2 = pool.clone();
         p2.spawn(gk_twitch::image::trim_cache);
-        Self { slots: HashMap::new(), done: Arc::default(), pool, http, wake, next_anim: 1, anim_bytes: 0, frame: 0, generation: 0 }
+        Self {
+            slots: HashMap::new(),
+            done: Arc::default(),
+            pool,
+            http,
+            wake,
+            next_anim: 1,
+            anim_bytes: 0,
+            frame: 0,
+            generation: 0,
+        }
     }
 
     /// The image if ready; starts loading it otherwise.
@@ -106,7 +116,11 @@ impl Images {
                     let bytes = img.frames.iter().map(|f| f.rgba.len()).sum::<usize>();
                     let id = self.next_anim;
                     self.next_anim += 1;
-                    let frames = AnimFrames { width: w, height: h, frames: img.frames.into_iter().map(|f| (f.rgba, f.delay_ms)).collect() };
+                    let frames = AnimFrames {
+                        width: w,
+                        height: h,
+                        frames: img.frames.into_iter().map(|f| (f.rgba, f.delay_ms)).collect(),
+                    };
                     if let Some(p) = presenter {
                         p.set_animation(id, Arc::new(frames));
                     }
@@ -115,7 +129,8 @@ impl Images {
                 }
                 Ok(img) => match img.frames.into_iter().next() {
                     Some(f) => {
-                        let ci = egui::ColorImage::from_rgba_unmultiplied([f.width as usize, f.height as usize], &f.rgba);
+                        let ci =
+                            egui::ColorImage::from_rgba_unmultiplied([f.width as usize, f.height as usize], &f.rgba);
                         let tex = ctx.load_texture(&url, ci, egui::TextureOptions::LINEAR);
                         Slot::Ready { img: Img::Static(tex), used: self.frame, bytes: 0 }
                     }

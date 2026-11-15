@@ -62,9 +62,12 @@ pub fn style(ctx: &egui::Context) {
 
 pub fn draw(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, heights: &mut Vec<(u64, u32)>) {
     shortcuts(app, ui);
-    egui::Panel::top("bar").exact_size(42.0).frame(egui::Frame::NONE.fill(PANEL).inner_margin(egui::Margin::symmetric(8, 6))).show(ui, |ui| {
-        top_bar(app, ui);
-    });
+    egui::Panel::top("bar")
+        .exact_size(42.0)
+        .frame(egui::Frame::NONE.fill(PANEL).inner_margin(egui::Margin::symmetric(8, 6)))
+        .show(ui, |ui| {
+            top_bar(app, ui);
+        });
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG)).show(ui, |ui| {
         if let Some(e) = app.error.clone() {
             ui.centered_and_justified(|ui| ui.label(RichText::new(e).color(BAD).size(16.0)));
@@ -101,7 +104,17 @@ fn shortcuts(app: &mut App, ui: &egui::Ui) {
             app.active = (app.active + 1) % app.tabs.len();
             app.maximized = None;
         }
-        let digits = [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6, egui::Key::Num7, egui::Key::Num8, egui::Key::Num9];
+        let digits = [
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+            egui::Key::Num7,
+            egui::Key::Num8,
+            egui::Key::Num9,
+        ];
         for (n, k) in digits.into_iter().enumerate() {
             if i.consume_key(egui::Modifiers::CTRL, k) && n < app.tabs.len() {
                 app.active = n;
@@ -121,9 +134,12 @@ fn shortcuts(app: &mut App, ui: &egui::Ui) {
 }
 
 fn pill(ui: &mut egui::Ui, text: &str, fill: Color32, fg: Color32) {
-    egui::Frame::NONE.fill(fill).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
-        ui.label(RichText::new(text).color(fg).size(12.0));
-    });
+    egui::Frame::NONE.fill(fill).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::symmetric(6, 2)).show(
+        ui,
+        |ui| {
+            ui.label(RichText::new(text).color(fg).size(12.0));
+        },
+    );
 }
 
 fn top_bar(app: &mut App, ui: &mut egui::Ui) {
@@ -144,7 +160,9 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             let n = app.tabs[i].stream_channels().len();
             let label = if n > 0 { format!("{}  {n}", app.tabs[i].title) } else { app.tabs[i].title.clone() };
             let text = RichText::new(label).color(if selected { TEXT } else { MUTED });
-            let b = egui::Button::new(text).fill(if selected { RAISED } else { Color32::TRANSPARENT }).stroke(if selected { Stroke::new(1.0, ACCENT) } else { Stroke::NONE });
+            let b = egui::Button::new(text)
+                .fill(if selected { RAISED } else { Color32::TRANSPARENT })
+                .stroke(if selected { Stroke::new(1.0, ACCENT) } else { Stroke::NONE });
             let r = ui.add(b).on_hover_text("Double-click to rename, middle-click to close");
             if r.clicked() {
                 app.active = i;
@@ -172,7 +190,11 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             app.active = app.active.min(app.tabs.len() - 1);
             app.maximized = None;
         }
-        if ui.add(egui::Button::new(RichText::new("+").size(16.0)).frame(false)).on_hover_text("New tab (Ctrl+T)").clicked() {
+        if ui
+            .add(egui::Button::new(RichText::new("+").size(16.0)).frame(false))
+            .on_hover_text("New tab (Ctrl+T)")
+            .clicked()
+        {
             app.tabs.push(Tab::new(&format!("Tab {}", app.tabs.len() + 1), vec![]));
             app.active = app.tabs.len() - 1;
             app.maximized = None;
@@ -182,19 +204,42 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
 
         // Right side, laid out right to left.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(RichText::new("⋯").size(16.0)).frame(false)).on_hover_text("About, updates, licences").clicked() {
+            if ui
+                .add(egui::Button::new(RichText::new("⋯").size(16.0)).frame(false))
+                .on_hover_text("About, updates, licences")
+                .clicked()
+            {
                 app.about_open = !app.about_open;
             }
             account_button(app, ui);
             if let Some(c) = app.update.found.clone() {
-                let label = if app.update.installing { format!("Updating to {}…", c.version) } else { format!("⬆ Update to {}", c.version) };
-                let hint = if crate::update::installed() { "Downloads, checks and installs it, then restarts (Ctrl+Shift+U)" } else { "Opens the download page (this copy was not installed by the setup)" };
-                if ui.add_enabled(!app.update.installing, egui::Button::new(RichText::new(label).color(Color32::BLACK)).fill(GOOD)).on_hover_text(hint).clicked() {
+                let label = if app.update.installing {
+                    format!("Updating to {}…", c.version)
+                } else {
+                    format!("⬆ Update to {}", c.version)
+                };
+                let hint = if crate::update::installed() {
+                    "Downloads, checks and installs it, then restarts (Ctrl+Shift+U)"
+                } else {
+                    "Opens the download page (this copy was not installed by the setup)"
+                };
+                if ui
+                    .add_enabled(
+                        !app.update.installing,
+                        egui::Button::new(RichText::new(label).color(Color32::BLACK)).fill(GOOD),
+                    )
+                    .on_hover_text(hint)
+                    .clicked()
+                {
                     app.install_update();
                 }
             }
             let stats_text = RichText::new("📊 Stats").color(if app.stats_open { TEXT } else { MUTED });
-            if ui.add(egui::Button::new(stats_text).fill(if app.stats_open { RAISED } else { Color32::TRANSPARENT })).on_hover_text("Stream stats (F3)").clicked() {
+            if ui
+                .add(egui::Button::new(stats_text).fill(if app.stats_open { RAISED } else { Color32::TRANSPARENT }))
+                .on_hover_text("Stream stats (F3)")
+                .clicked()
+            {
                 app.stats_open = !app.stats_open;
             }
             ui.menu_button(RichText::new(format!("⚡ {}", app.latency.label())), |ui| {
@@ -219,7 +264,10 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
 }
 
 pub fn add_channel_box(app: &mut App, ui: &mut egui::Ui, width: f32, id: &str) {
-    let te = egui::TextEdit::singleline(&mut app.add_text).hint_text("Add channel…").desired_width(width).id_salt(("add", id));
+    let te = egui::TextEdit::singleline(&mut app.add_text)
+        .hint_text("Add channel…")
+        .desired_width(width)
+        .id_salt(("add", id));
     let r = ui.add(te);
     if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         let text = std::mem::take(&mut app.add_text);
@@ -230,16 +278,25 @@ pub fn add_channel_box(app: &mut App, ui: &mut egui::Ui, width: f32, id: &str) {
             app.refresh_followed(false);
             ui.set_min_width(280.0);
             if app.followed.is_empty() {
-                ui.label(RichText::new(if app.followed_loading { "Loading…" } else { "No followed channel is live." }).color(MUTED));
+                ui.label(
+                    RichText::new(if app.followed_loading { "Loading…" } else { "No followed channel is live." })
+                        .color(MUTED),
+                );
             }
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                 let list = app.followed.clone();
                 for c in list {
-                    let viewers = if c.viewers >= 1000 { format!("{:.1}k", c.viewers as f64 / 1000.0) } else { c.viewers.to_string() };
+                    let viewers = if c.viewers >= 1000 {
+                        format!("{:.1}k", c.viewers as f64 / 1000.0)
+                    } else {
+                        c.viewers.to_string()
+                    };
                     let r = ui.add(
-                        egui::Button::new(
-                            egui::text::LayoutJob::simple_singleline(format!("● {}   {}   {viewers}", c.display_name, c.category), FontId::proportional(14.0), TEXT),
-                        )
+                        egui::Button::new(egui::text::LayoutJob::simple_singleline(
+                            format!("● {}   {}   {viewers}", c.display_name, c.category),
+                            FontId::proportional(14.0),
+                            TEXT,
+                        ))
                         .frame(false),
                     );
                     let r = r.on_hover_text(&c.title);
@@ -260,7 +317,10 @@ fn layout_menu(app: &mut App, ui: &mut egui::Ui) {
         let Some(tab) = app.tabs.get_mut(app.active) else { return };
         let streams = tab.stream_channels();
         let chat_channel = tab.audio.clone().or_else(|| streams.first().cloned());
-        ui.label(RichText::new(format!("Arrange {} stream{}", streams.len(), if streams.len() == 1 { "" } else { "s" })).color(MUTED));
+        ui.label(
+            RichText::new(format!("Arrange {} stream{}", streams.len(), if streams.len() == 1 { "" } else { "s" }))
+                .color(MUTED),
+        );
         for p in Preset::ALL {
             ui.horizontal(|ui| {
                 if ui.button(format!("{}  {}", p.icon(), p.label())).clicked() {
@@ -278,7 +338,9 @@ fn layout_menu(app: &mut App, ui: &mut egui::Ui) {
             });
         }
         ui.separator();
-        ui.label(RichText::new("Drag a tile by its top bar to move it; drag the gaps to resize.").color(MUTED).size(12.0));
+        ui.label(
+            RichText::new("Drag a tile by its top bar to move it; drag the gaps to resize.").color(MUTED).size(12.0),
+        );
     });
 }
 
@@ -288,7 +350,11 @@ fn account_button(app: &mut App, ui: &mut egui::Ui) {
         None => ("Log in".to_owned(), TEXT),
     };
     let fill = if app.auth.is_some() { RAISED } else { ACCENT };
-    if ui.add(egui::Button::new(RichText::new(text).color(color)).fill(fill)).on_hover_text("Account, Turbo and chat").clicked() {
+    if ui
+        .add(egui::Button::new(RichText::new(text).color(color)).fill(fill))
+        .on_hover_text("Account, Turbo and chat")
+        .clicked()
+    {
         app.login.open = true;
         app.login.message = None;
     }
@@ -453,11 +519,19 @@ fn logged_in_view(app: &mut App, ui: &mut egui::Ui, a: &gk_twitch::Auth) {
     } else if app.streams.is_empty() {
         RichText::new("Open a stream to see whether this account plays without ads.").color(MUTED)
     } else if ads {
-        RichText::new("This account has no Turbo, so Twitch sends ads. Glotzkiste skips them; the picture holds during a break.").color(WARN)
+        RichText::new(
+            "This account has no Turbo, so Twitch sends ads. Glotzkiste skips them; the picture holds during a break.",
+        )
+        .color(WARN)
     } else {
         RichText::new("✔ No ads on the open streams.").color(GOOD)
     });
-    let identity = a.user_agent.as_deref().and_then(crate::app::ua_label).map(|l| format!("✔ Requests look like your browser ({l})")).unwrap_or_else(|| "Requests use a standard browser identity".into());
+    let identity = a
+        .user_agent
+        .as_deref()
+        .and_then(crate::app::ua_label)
+        .map(|l| format!("✔ Requests look like your browser ({l})"))
+        .unwrap_or_else(|| "Requests use a standard browser identity".into());
     ui.label(RichText::new(identity).color(if a.user_agent.is_some() { GOOD } else { MUTED }));
     if a.device_id.is_some() {
         ui.label(RichText::new("✔ Same device as your browser session").color(GOOD));

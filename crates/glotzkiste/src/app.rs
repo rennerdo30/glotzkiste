@@ -173,7 +173,11 @@ pub fn run(options: Options) -> i32 {
 
 /// Checks the token and attaches the browser identity (user agent from the
 /// browser's version, device id from its cookie). Runs on a worker.
-fn finish_login(http: &Http, found: gk_twitch::auth::LoginInput, browser: Option<&crate::browsers::Browser>) -> Result<Auth, String> {
+fn finish_login(
+    http: &Http,
+    found: gk_twitch::auth::LoginInput,
+    browser: Option<&crate::browsers::Browser>,
+) -> Result<Auth, String> {
     let mut a = gk_twitch::auth::validate(http, &found.token).map_err(|e| e.to_string())?;
     a.device_id = found.device_id;
     a.user_agent = browser.and_then(crate::browsers::user_agent).map(|(ua, _)| ua);
@@ -386,7 +390,12 @@ impl App {
                                 muted_by_flag: self.options.mute,
                             };
                             let audible = active && audio.as_deref() == Some(p.channel.as_str());
-                            let settings = Settings { quality: p.quality.clone(), volume: p.volume, muted: !audible, latency: self.latency };
+                            let settings = Settings {
+                                quality: p.quality.clone(),
+                                volume: p.volume,
+                                muted: !audible,
+                                latency: self.latency,
+                            };
                             self.streams.insert(id, StreamHandle::spawn(id, p.channel.clone(), env, settings));
                             self.muted.insert(id, !audible);
                         }
@@ -427,7 +436,8 @@ impl App {
     }
 
     pub(crate) fn add_channel(&mut self, raw: &str) {
-        let login = raw.trim().trim_start_matches("https://").trim_start_matches("www.").trim_start_matches("twitch.tv/");
+        let login =
+            raw.trim().trim_start_matches("https://").trim_start_matches("www.").trim_start_matches("twitch.tv/");
         let login = login.split(['/', '?']).next().unwrap_or_default().to_ascii_lowercase();
         if !gk_twitch::api::valid_login(&login) {
             return;
@@ -448,13 +458,17 @@ impl App {
 
     pub(crate) fn start_login(&mut self, input: String) {
         let Some(found) = gk_twitch::auth::parse_login_input(&input) else {
-            self.login.message = Some((false, "No Twitch login in that. Paste the auth-token value, or what the extension copied.".into()));
+            self.login.message = Some((
+                false,
+                "No Twitch login in that. Paste the auth-token value, or what the extension copied.".into(),
+            ));
             return;
         };
         self.login.busy = true;
         self.login.message = None;
         let browser = self.login_browser();
-        let (slot, wake, http) = (self.login_result.clone(), self.wake(), self.client.lock().map(|c| c.http().clone()).unwrap_or_default());
+        let (slot, wake, http) =
+            (self.login_result.clone(), self.wake(), self.client.lock().map(|c| c.http().clone()).unwrap_or_default());
         self.pool.spawn(move || {
             let r = finish_login(&http, found, browser.as_ref());
             if let Ok(a) = &r
@@ -479,7 +493,9 @@ impl App {
             return;
         }
         use winit::platform::windows::WindowAttributesExtWindows;
-        let mut attrs = Window::default_attributes().with_title("Glotzkiste stats").with_min_inner_size(LogicalSize::new(560.0, 320.0));
+        let mut attrs = Window::default_attributes()
+            .with_title("Glotzkiste stats")
+            .with_min_inner_size(LogicalSize::new(560.0, 320.0));
         {
             use winit::platform::windows::IconExtWindows;
             let small = winit::window::Icon::from_resource(1, Some(PhysicalSize::new(32, 32))).ok();
@@ -487,7 +503,11 @@ impl App {
             attrs = attrs.with_window_icon(small).with_taskbar_icon(big);
         }
         attrs = if self.smoke_until.is_some() {
-            attrs.with_inner_size(PhysicalSize::new(1400, 800)).with_position(PhysicalPosition::new(-20000, -21000)).with_skip_taskbar(true).with_active(false)
+            attrs
+                .with_inner_size(PhysicalSize::new(1400, 800))
+                .with_position(PhysicalPosition::new(-20000, -21000))
+                .with_skip_taskbar(true)
+                .with_active(false)
         } else {
             attrs.with_inner_size(LogicalSize::new(1100.0, 700.0))
         };
@@ -515,8 +535,22 @@ impl App {
         if let Some(defs) = &self.font_defs {
             ctx.set_fonts(defs.clone());
         }
-        let state = egui_winit::State::new(ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(8192));
-        self.stats_win = Some(StatsWindow { window, state, ctx, presenter, needs_pass: true, last_pass: Instant::now() - Duration::from_secs(1) });
+        let state = egui_winit::State::new(
+            ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            Some(8192),
+        );
+        self.stats_win = Some(StatsWindow {
+            window,
+            state,
+            ctx,
+            presenter,
+            needs_pass: true,
+            last_pass: Instant::now() - Duration::from_secs(1),
+        });
     }
 
     /// One pass of the stats window (twice a second, and on input).
@@ -544,16 +578,24 @@ impl App {
         };
         let mut c = Some(c);
         let full = w.ctx.run_ui(raw, |ui| {
-            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(crate::ui::BG).inner_margin(10)).show(ui, |ui| {
-                if let Some(c) = c.take() {
-                    crate::ui::stats::contents(ui, c);
-                }
-            });
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(crate::ui::BG).inner_margin(10)).show(
+                ui,
+                |ui| {
+                    if let Some(c) = c.take() {
+                        crate::ui::stats::contents(ui, c);
+                    }
+                },
+            );
         });
         w.state.handle_platform_output(&w.window, full.platform_output);
         let ppp = full.pixels_per_point;
         let primitives = w.ctx.tessellate(full.shapes, ppp);
-        w.presenter.submit(UiFrame { primitives, textures_delta: full.textures_delta, pixels_per_point: ppp, videos: Vec::new() });
+        w.presenter.submit(UiFrame {
+            primitives,
+            textures_delta: full.textures_delta,
+            pixels_per_point: ppp,
+            videos: Vec::new(),
+        });
         if full.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay.is_zero()) {
             w.needs_pass = true;
         }
@@ -583,11 +625,18 @@ impl App {
         let drops: i64 = on_gpu.iter().map(|(_, st)| st.drops).sum();
         let dropping = drops > self.valve.drops;
         self.valve.drops = drops;
-        if self.valve.hot < 3 || !dropping || self.valve.last_move.is_some_and(|t| t.elapsed() < Duration::from_secs(10)) {
+        if self.valve.hot < 3
+            || !dropping
+            || self.valve.last_move.is_some_and(|t| t.elapsed() < Duration::from_secs(10))
+        {
             return;
         }
         let Some((id, _)) = on_gpu.iter().max_by_key(|(id, _)| *id) else { return };
-        let target = if gpus.iter().any(|g| g.is_nvidia() && g.luid != self.render_luid) { crate::stream::DecodeOn::Nvidia } else { crate::stream::DecodeOn::Cpu };
+        let target = if gpus.iter().any(|g| g.is_nvidia() && g.luid != self.render_luid) {
+            crate::stream::DecodeOn::Nvidia
+        } else {
+            crate::stream::DecodeOn::Cpu
+        };
         log::warn!("video decoder at {:.0} % with dropped frames: stream {id} moves to {target:?}", mine.decode_pct);
         if let Some(s) = self.streams.get(id) {
             s.send(Cmd::Decoder(target));
@@ -673,14 +722,22 @@ impl App {
         let http = self.client.lock().map(|c| c.http().clone()).unwrap_or_default();
         let browser = self.login_browser();
         self.pool.spawn(move || {
-            let file = path.or_else(|| rfd::FileDialog::new().set_title("Your Twitch cookies (cookies.txt)").add_filter("Cookies", &["txt", "json"]).pick_file());
+            let file = path.or_else(|| {
+                rfd::FileDialog::new()
+                    .set_title("Your Twitch cookies (cookies.txt)")
+                    .add_filter("Cookies", &["txt", "json"])
+                    .pick_file()
+            });
             let used = file.clone();
             let r = match file {
                 None => Err(String::new()),
                 Some(path) => match std::fs::read_to_string(&path) {
                     Err(e) => Err(format!("Could not read the file: {e}")),
                     Ok(text) => match gk_twitch::auth::parse_login_input(&text) {
-                        None => Err("That file has no Twitch login. Export it while twitch.tv is open and you are logged in.".into()),
+                        None => Err(
+                            "That file has no Twitch login. Export it while twitch.tv is open and you are logged in."
+                                .into(),
+                        ),
                         Some(found) => finish_login(&http, found, browser.as_ref()).inspect(|a| {
                             if let Err(e) = gk_twitch::auth::store::save(a) {
                                 log::warn!("could not store the login: {e}");
@@ -730,7 +787,11 @@ impl App {
         self.followed_at = Some(Instant::now());
         let (slot, wake, client) = (self.followed_slot.clone(), self.wake(), self.client.clone());
         self.pool.spawn(move || {
-            let r = client.lock().map(|c| c.clone()).map_err(|_| "busy".to_string()).and_then(|c| c.followed_live().map_err(|e| e.to_string()));
+            let r = client
+                .lock()
+                .map(|c| c.clone())
+                .map_err(|_| "busy".to_string())
+                .and_then(|c| c.followed_live().map_err(|e| e.to_string()));
             if let Ok(mut s) = slot.lock() {
                 *s = Some(r);
             }
@@ -743,7 +804,8 @@ impl App {
         if self.info_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
             return;
         }
-        let logins: Vec<String> = self.tabs.iter().flat_map(|t| t.stream_channels()).collect::<HashSet<_>>().into_iter().collect();
+        let logins: Vec<String> =
+            self.tabs.iter().flat_map(|t| t.stream_channels()).collect::<HashSet<_>>().into_iter().collect();
         if logins.is_empty() {
             return;
         }
@@ -783,7 +845,10 @@ impl App {
                     self.update.message = Some((true, format!("Glotzkiste {} is available.", c.version)));
                     self.update.found = Some(c);
                 }
-                Ok(Outcome::UpToDate) => self.update.message = force.then(|| (true, format!("Glotzkiste {} is the newest version.", env!("CARGO_PKG_VERSION")))),
+                Ok(Outcome::UpToDate) => {
+                    self.update.message = force
+                        .then(|| (true, format!("Glotzkiste {} is the newest version.", env!("CARGO_PKG_VERSION"))))
+                }
                 Ok(Outcome::Off(why)) => self.update.message = Some((false, why)),
                 Ok(Outcome::Skipped) => {}
                 Err(e) => {
@@ -901,7 +966,15 @@ impl App {
         let tabs: Vec<String> = self
             .tabs
             .iter()
-            .map(|t| format!("{}[{}{}{}]", t.title, t.stream_channels().join(","), if t.has_chat() { " +chat" } else { "" }, t.audio.as_deref().map(|a| format!(" audio={a}")).unwrap_or_default()))
+            .map(|t| {
+                format!(
+                    "{}[{}{}{}]",
+                    t.title,
+                    t.stream_channels().join(","),
+                    if t.has_chat() { " +chat" } else { "" },
+                    t.audio.as_deref().map(|a| format!(" audio={a}")).unwrap_or_default()
+                )
+            })
             .collect();
         format!("state: active={} latency={:?} tabs={}", self.active, self.latency, tabs.join(" "))
     }
@@ -975,7 +1048,10 @@ impl App {
             if self.stats_win.is_some() {
                 self.stats_pass();
                 if let Some(w) = &self.stats_win {
-                    let stats_path = path.with_file_name(format!("{}-stats.png", path.file_stem().and_then(|s| s.to_str()).unwrap_or("snapshot")));
+                    let stats_path = path.with_file_name(format!(
+                        "{}-stats.png",
+                        path.file_stem().and_then(|s| s.to_str()).unwrap_or("snapshot")
+                    ));
                     if let Err(e) = w.presenter.snapshot(stats_path) {
                         log::error!("stats snapshot: {e}");
                     }
@@ -1035,7 +1111,13 @@ impl App {
         }
         println!("{}", self.describe_state());
         for g in self.gpus.lock().map(|g| g.clone()).unwrap_or_default() {
-            println!("gpu: {} decode={:.2}% render={} nvidia={}", g.name, g.decode_pct, g.luid == self.render_luid, g.is_nvidia());
+            println!(
+                "gpu: {} decode={:.2}% render={} nvidia={}",
+                g.name,
+                g.decode_pct,
+                g.luid == self.render_luid,
+                g.is_nvidia()
+            );
         }
         for (name, ch) in &self.chat.channels {
             println!("chat {name}: lines={} room_id={} emotes={}", ch.buffer.len(), ch.room_id, ch.emotes.len());
@@ -1051,7 +1133,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
         use winit::platform::windows::WindowAttributesExtWindows;
         let (w, h) = self.options.size.unwrap_or((1600, 900));
-        let mut attrs = Window::default_attributes().with_title("Glotzkiste").with_min_inner_size(LogicalSize::new(480.0, 270.0));
+        let mut attrs =
+            Window::default_attributes().with_title("Glotzkiste").with_min_inner_size(LogicalSize::new(480.0, 270.0));
         {
             // The exe's own icon resource (build.rs): small for the title
             // bar, large for the taskbar and Alt-Tab.
@@ -1079,9 +1162,14 @@ impl ApplicationHandler<UserEvent> for App {
                 .with_skip_taskbar(true)
                 .with_active(false)
         } else if let Some(g) = saved {
-            attrs.with_inner_size(PhysicalSize::new(g.w, g.h)).with_position(PhysicalPosition::new(g.x, g.y)).with_maximized(g.maximized)
+            attrs
+                .with_inner_size(PhysicalSize::new(g.w, g.h))
+                .with_position(PhysicalPosition::new(g.x, g.y))
+                .with_maximized(g.maximized)
         } else {
-            attrs.with_inner_size(LogicalSize::new(w as f64, h as f64)).with_maximized(self.geom.is_some_and(|g| g.maximized))
+            attrs
+                .with_inner_size(LogicalSize::new(w as f64, h as f64))
+                .with_maximized(self.geom.is_some_and(|g| g.maximized))
         };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -1105,14 +1193,22 @@ impl ApplicationHandler<UserEvent> for App {
         match Presenter::start(hwnd, (size.width, size.height)) {
             Ok((p, info)) => {
                 log::info!("adapter: {} software={}", info.adapter, info.software);
-                self.adapter = if info.software { format!("{} (software)", info.adapter) } else { info.adapter.clone() };
+                self.adapter =
+                    if info.software { format!("{} (software)", info.adapter) } else { info.adapter.clone() };
                 self.render_luid = info.luid;
                 p.set_clear_color(crate::ui::BG_LINEAR);
                 self.presenter = Some(Arc::new(p));
             }
             Err(e) => self.error = Some(format!("Video output failed: {e}")),
         }
-        let state = egui_winit::State::new(self.ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(8192));
+        let state = egui_winit::State::new(
+            self.ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            Some(8192),
+        );
         // Installed release builds look for updates once a day.
         self.check_updates(false);
         // The UI never updates faster than the display can show.

@@ -37,7 +37,12 @@ fn adapters() -> Vec<Gpu> {
                 continue;
             }
             let name = String::from_utf16_lossy(&d.Description).trim_end_matches('\0').to_owned();
-            out.push(Gpu { name, luid: (d.AdapterLuid.LowPart, d.AdapterLuid.HighPart), vendor: d.VendorId, decode_pct: 0.0 });
+            out.push(Gpu {
+                name,
+                luid: (d.AdapterLuid.LowPart, d.AdapterLuid.HighPart),
+                vendor: d.VendorId,
+                decode_pct: 0.0,
+            });
         }
     }
     out
@@ -152,7 +157,12 @@ pub fn start() -> Shared {
                 let samples = q.sample();
                 let mut now = list.clone();
                 for g in now.iter_mut() {
-                    g.decode_pct = samples.iter().filter(|(l, _, _)| *l == g.luid).map(|(_, _, v)| *v).fold(0.0, f64::max).min(100.0);
+                    g.decode_pct = samples
+                        .iter()
+                        .filter(|(l, _, _)| *l == g.luid)
+                        .map(|(_, _, v)| *v)
+                        .fold(0.0, f64::max)
+                        .min(100.0);
                 }
                 if let Ok(mut g) = s.lock() {
                     *g = now;

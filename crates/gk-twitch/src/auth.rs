@@ -24,7 +24,11 @@ pub struct Auth {
 
 impl fmt::Debug for Auth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Auth").field("login", &self.login).field("user_id", &self.user_id).field("user_agent", &self.user_agent).finish_non_exhaustive()
+        f.debug_struct("Auth")
+            .field("login", &self.login)
+            .field("user_id", &self.user_id)
+            .field("user_agent", &self.user_agent)
+            .finish_non_exhaustive()
     }
 }
 
@@ -44,7 +48,8 @@ impl fmt::Debug for LoginInput {
 /// The token and, when present (cookie exports), the device id.
 pub fn parse_login_input(input: &str) -> Option<LoginInput> {
     let token = parse_token_input(input)?;
-    let device_id = find_cookie(input, "unique_id").filter(|v| (8..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric()));
+    let device_id = find_cookie(input, "unique_id")
+        .filter(|v| (8..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric()));
     Some(LoginInput { token, device_id })
 }
 
@@ -125,10 +130,11 @@ pub fn parse_token_input(input: &str) -> Option<String> {
     }
     // Cookie header: "a=b; auth-token=xyz; c=d".
     for part in text.trim_start_matches("Cookie:").split(';') {
-        if let Some((k, v)) = part.split_once('=') {
-            if k.trim() == "auth-token" && plausible_token(v.trim()) {
-                return Some(v.trim().to_owned());
-            }
+        if let Some((k, v)) = part.split_once('=')
+            && k.trim() == "auth-token"
+            && plausible_token(v.trim())
+        {
+            return Some(v.trim().to_owned());
         }
     }
     None
@@ -187,7 +193,13 @@ pub mod store {
         }
         // Older entries end here; newer ones add the browser identity.
         let opt = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
-        Some(Auth { token: token.into(), login: login.into(), user_id: user_id.into(), user_agent: opt(it.next()), device_id: opt(it.next()) })
+        Some(Auth {
+            token: token.into(),
+            login: login.into(),
+            user_id: user_id.into(),
+            user_agent: opt(it.next()),
+            device_id: opt(it.next()),
+        })
     }
 
     pub fn save(auth: &Auth) -> Result<()> {
@@ -247,8 +259,8 @@ pub mod store {
     mod cred {
         use windows::Win32::Foundation::FILETIME;
         use windows::Win32::Security::Credentials::{
-            CRED_FLAGS, CRED_MAX_CREDENTIAL_BLOB_SIZE, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree,
-            CredReadW, CredWriteW,
+            CRED_FLAGS, CRED_MAX_CREDENTIAL_BLOB_SIZE, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW,
+            CredDeleteW, CredFree, CredReadW, CredWriteW,
         };
         use windows::core::{HSTRING, PWSTR};
 
@@ -440,12 +452,16 @@ mod tests {
 
     #[test]
     fn device_id_comes_from_the_unique_id_cookie() {
-        let txt = format!(".twitch.tv\tTRUE\t/\tTRUE\t0\tunique_id\tAbCdEf0123456789\n.twitch.tv\tTRUE\t/\tTRUE\t0\tauth-token\t{T}\n");
+        let txt = format!(
+            ".twitch.tv\tTRUE\t/\tTRUE\t0\tunique_id\tAbCdEf0123456789\n.twitch.tv\tTRUE\t/\tTRUE\t0\tauth-token\t{T}\n"
+        );
         let i = parse_login_input(&txt).unwrap();
         assert_eq!((i.token.as_str(), i.device_id.as_deref()), (T, Some("AbCdEf0123456789")));
         // A bare token has no device id; a cookie from another site is ignored.
         assert_eq!(parse_login_input(T).unwrap().device_id, None);
-        let other = format!(".example.com\tTRUE\t/\tTRUE\t0\tunique_id\tAbCdEf0123456789\n.twitch.tv\tTRUE\t/\tTRUE\t0\tauth-token\t{T}\n");
+        let other = format!(
+            ".example.com\tTRUE\t/\tTRUE\t0\tunique_id\tAbCdEf0123456789\n.twitch.tv\tTRUE\t/\tTRUE\t0\tauth-token\t{T}\n"
+        );
         assert_eq!(parse_login_input(&other).unwrap().device_id, None);
     }
 }

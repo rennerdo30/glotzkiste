@@ -311,7 +311,12 @@ impl Connection {
                             }),
                             badges: line
                                 .tag("badges")
-                                .map(|b| b.split(',').filter_map(|p| p.split_once('/')).map(|(s, v)| (s.into(), v.into())).collect())
+                                .map(|b| {
+                                    b.split(',')
+                                        .filter_map(|p| p.split_once('/'))
+                                        .map(|(s, v)| (s.into(), v.into()))
+                                        .collect()
+                                })
                                 .unwrap_or_default(),
                         };
                         self.userstate.insert(line.channel().to_owned(), st);
@@ -347,7 +352,10 @@ impl Connection {
             Some(t) => (t.to_owned(), true),
             None => (text, false),
         };
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         (self.on_event)(ChatEvent::Message(ChatMessage {
             id: format!("local-{now}"),
             channel: channel.to_owned(),

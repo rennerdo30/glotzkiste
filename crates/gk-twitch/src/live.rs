@@ -86,7 +86,11 @@ pub fn parse_pdt(s: &str) -> Option<f64> {
 fn attr<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let i = line.find(&format!("{key}="))?;
     let v = &line[i + key.len() + 1..];
-    Some(if let Some(q) = v.strip_prefix('"') { q.split('"').next().unwrap_or_default() } else { v.split(',').next().unwrap_or_default() })
+    Some(if let Some(q) = v.strip_prefix('"') {
+        q.split('"').next().unwrap_or_default()
+    } else {
+        v.split(',').next().unwrap_or_default()
+    })
 }
 
 /// Parses a Twitch media playlist, including prefetch segments and ad marks.
@@ -99,7 +103,8 @@ pub fn parse_media(text: &str) -> MediaPlaylist {
     let mut discontinuity = false;
     let mut ad_ranges: Vec<(f64, f64)> = Vec::new();
     let mut init: Option<String> = None;
-    let in_ad = |pdt: Option<f64>, ranges: &[(f64, f64)]| pdt.is_some_and(|p| ranges.iter().any(|(s, e)| p >= *s && p < *e));
+    let in_ad =
+        |pdt: Option<f64>, ranges: &[(f64, f64)]| pdt.is_some_and(|p| ranges.iter().any(|(s, e)| p >= *s && p < *e));
     for line in text.lines().map(str::trim) {
         if let Some(v) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
             seq = v.parse().unwrap_or(0);
@@ -127,7 +132,12 @@ pub fn parse_media(text: &str) -> MediaPlaylist {
                 // break lasts until the next segment titled "live".
                 let end = attr(v, "END-DATE")
                     .and_then(parse_pdt)
-                    .or_else(|| ["DURATION", "PLANNED-DURATION", "X-TV-TWITCH-AD-POD-FILLED-DURATION"].iter().find_map(|k| attr(v, k)?.parse::<f64>().ok()).map(|d| start + d))
+                    .or_else(|| {
+                        ["DURATION", "PLANNED-DURATION", "X-TV-TWITCH-AD-POD-FILLED-DURATION"]
+                            .iter()
+                            .find_map(|k| attr(v, k)?.parse::<f64>().ok())
+                            .map(|d| start + d)
+                    })
                     .unwrap_or(f64::INFINITY);
                 ad_ranges.push((start, end));
             }
@@ -141,7 +151,15 @@ pub fn parse_media(text: &str) -> MediaPlaylist {
             };
             let pdt = last.pdt.map(|p| p + last.duration);
             let ad = discontinuity || in_ad(pdt, &ad_ranges);
-            out.segments.push(Segment { seq: last.seq + 1, url: url.to_owned(), duration, pdt, ad, prefetch: true, init: last.init.clone() });
+            out.segments.push(Segment {
+                seq: last.seq + 1,
+                url: url.to_owned(),
+                duration,
+                pdt,
+                ad,
+                prefetch: true,
+                init: last.init.clone(),
+            });
         } else if line.starts_with("#EXT-X-ENDLIST") {
             out.ended = true;
         } else if !line.is_empty() && !line.starts_with('#') {
@@ -163,7 +181,15 @@ pub fn parse_media(text: &str) -> MediaPlaylist {
             if !ad && out.segments.last().is_some_and(|s| !s.ad) {
                 discontinuity = false;
             }
-            let s = Segment { seq, url: line.to_owned(), duration: pending_dur, pdt: pending_pdt.take(), ad, prefetch: false, init: init.clone() };
+            let s = Segment {
+                seq,
+                url: line.to_owned(),
+                duration: pending_dur,
+                pdt: pending_pdt.take(),
+                ad,
+                prefetch: false,
+                init: init.clone(),
+            };
             seq += 1;
             out.segments.push(s);
         }
@@ -306,7 +332,12 @@ impl LiveFeed {
     pub fn start(http: Http, variants: Vec<Variant>, initial: usize, on_change: Arc<dyn Fn() + Send + Sync>) -> Self {
         let initial = initial.min(variants.len().saturating_sub(1));
         let shared = Arc::new(Shared {
-            pipe: Mutex::new(Pipe { buf: VecDeque::with_capacity(1024 * 1024), closed: false, cancelled: false, epoch: 0 }),
+            pipe: Mutex::new(Pipe {
+                buf: VecDeque::with_capacity(1024 * 1024),
+                closed: false,
+                cancelled: false,
+                epoch: 0,
+            }),
             readable: Condvar::new(),
             writable: Condvar::new(),
             control: Mutex::new(Control { variants, want: initial, generation: 0 }),
@@ -504,15 +535,17 @@ fn playlist_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
                 // First load: start at the first prefetch segment (being
                 // encoded right now), otherwise two segments from the end.
                 let live: Vec<usize> = (0..pl.segments.len()).filter(|&i| !pl.segments[i].ad).collect();
-                pl.segments.iter().position(|s| s.prefetch && !s.ad).or_else(|| live.iter().rev().nth(1).copied()).unwrap_or(0)
+                pl.segments
+                    .iter()
+                    .position(|s| s.prefetch && !s.ad)
+                    .or_else(|| live.iter().rev().nth(1).copied())
+                    .unwrap_or(0)
             }
             (Some(seq), pdt) => {
                 // Prefer time alignment (sequence numbers can differ between
                 // variants and across token refreshes).
                 let by_time = pdt.and_then(|p| pl.segments.iter().position(|s| s.pdt.is_some_and(|sp| sp > p - 0.25)));
-                by_time
-                    .or_else(|| pl.segments.iter().position(|s| s.seq >= seq))
-                    .unwrap_or(pl.segments.len())
+                by_time.or_else(|| pl.segments.iter().position(|s| s.seq >= seq)).unwrap_or(pl.segments.len())
             }
         };
         let mut added = false;
@@ -558,13 +591,28 @@ fn playlist_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
         if pl.ended {
             // Let the writer drain, then close the pipe.
             let mut q = lock(&shared.queue);
-            q.push_back((u64::MAX, Segment { seq: u64::MAX, url: String::new(), duration: 0.0, pdt: None, ad: false, prefetch: false, init: None }));
+            q.push_back((
+                u64::MAX,
+                Segment {
+                    seq: u64::MAX,
+                    url: String::new(),
+                    duration: 0.0,
+                    pdt: None,
+                    ad: false,
+                    prefetch: false,
+                    init: None,
+                },
+            ));
             shared.queued.notify_all();
             return;
         }
         // Low latency: the next prefetch segment appears about one segment
         // duration later; poll at half that to stay ahead of it.
-        let interval = if low_latency { (pl.target_duration / 2.0).clamp(0.5, 1.0) } else { (pl.target_duration / 2.0).clamp(1.0, 3.0) };
+        let interval = if low_latency {
+            (pl.target_duration / 2.0).clamp(0.5, 1.0)
+        } else {
+            (pl.target_duration / 2.0).clamp(1.0, 3.0)
+        };
         let elapsed = started.elapsed().as_secs_f64();
         sleep_unless_stopped(shared, Duration::from_secs_f64((interval - elapsed).max(0.1)));
     }
@@ -650,50 +698,55 @@ fn writer_loop(shared: &Shared, http: &Http, cb: &(dyn Fn() + Send + Sync)) {
         if generation != current_gen {
             continue;
         }
-        if let Some(init_url) = &seg.init {
-            if written_init.as_deref() != Some(init_url.as_str()) {
-                let bytes = match &init_cache {
-                    Some((u, b)) if u == init_url => Ok(b.clone()),
-                    _ => http.get_bytes(init_url, &[], 1024 * 1024),
-                };
-                let bytes = match bytes {
-                    Ok(b) => b,
-                    Err(e) => {
-                        set_status(shared, cb, |s| s.last_error = Some(format!("init segment: {e}")));
-                        continue;
-                    }
-                };
-                // A new init mid-stream (fMP4 quality switch): restart the
-                // byte stream; the player reopens it at the new epoch.
-                if written_init.is_some() {
-                    let epoch = {
-                        let mut p = lock(&shared.pipe);
-                        p.buf.clear();
-                        p.epoch += 1;
-                        p.epoch
-                    };
-                    shared.readable.notify_all();
-                    shared.writable.notify_all();
-                    set_status(shared, cb, |s| s.epoch = epoch);
+        if let Some(init_url) = &seg.init
+            && written_init.as_deref() != Some(init_url.as_str())
+        {
+            let bytes = match &init_cache {
+                Some((u, b)) if u == init_url => Ok(b.clone()),
+                _ => http.get_bytes(init_url, &[], 1024 * 1024),
+            };
+            let bytes = match bytes {
+                Ok(b) => b,
+                Err(e) => {
+                    set_status(shared, cb, |s| s.last_error = Some(format!("init segment: {e}")));
+                    continue;
                 }
-                if !push(shared, &bytes) {
-                    return;
-                }
-                init_cache = Some((init_url.clone(), bytes));
-                written_init = Some(init_url.clone());
+            };
+            // A new init mid-stream (fMP4 quality switch): restart the
+            // byte stream; the player reopens it at the new epoch.
+            if written_init.is_some() {
+                let epoch = {
+                    let mut p = lock(&shared.pipe);
+                    p.buf.clear();
+                    p.epoch += 1;
+                    p.epoch
+                };
+                shared.readable.notify_all();
+                shared.writable.notify_all();
+                set_status(shared, cb, |s| s.epoch = epoch);
             }
+            if !push(shared, &bytes) {
+                return;
+            }
+            init_cache = Some((init_url.clone(), bytes));
+            written_init = Some(init_url.clone());
         }
-        log::info!("segment {} {}{} start", seg.seq, if seg.prefetch { "prefetch " } else { "" }, if seg.init.is_some() { "fmp4" } else { "ts" });
+        log::info!(
+            "segment {} {}{} start",
+            seg.seq,
+            if seg.prefetch { "prefetch " } else { "" },
+            if seg.init.is_some() { "fmp4" } else { "ts" }
+        );
         let chunks = match ahead.take() {
             Some((g, seq, rx)) if g == generation && seq == seg.seq => rx,
             _ => fetch(http, seg.url.clone(), stop.clone()),
         };
         // Open the next segment now, so its first byte is already on the way
         // when this one ends.
-        if let Some((g, next)) = peek_segment(shared) {
-            if next.seq != u64::MAX {
-                ahead = Some((g, next.seq, fetch(http, next.url, stop.clone())));
-            }
+        if let Some((g, next)) = peek_segment(shared)
+            && next.seq != u64::MAX
+        {
+            ahead = Some((g, next.seq, fetch(http, next.url, stop.clone())));
         }
         let mut ok = true;
         let deadline = Duration::from_secs_f64((seg.duration * 3.0).max(6.0));
@@ -748,7 +801,11 @@ fn push(shared: &Shared, bytes: &[u8]) -> bool {
         }
         let room = PIPE_CAPACITY.saturating_sub(pipe.buf.len());
         if room == 0 {
-            pipe = shared.writable.wait_timeout(pipe, Duration::from_millis(200)).map(|r| r.0).unwrap_or_else(|p| p.into_inner().0);
+            pipe = shared
+                .writable
+                .wait_timeout(pipe, Duration::from_millis(200))
+                .map(|r| r.0)
+                .unwrap_or_else(|p| p.into_inner().0);
             continue;
         }
         let n = room.min(rest.len());

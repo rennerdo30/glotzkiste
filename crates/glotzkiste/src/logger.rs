@@ -29,7 +29,8 @@ impl log::Log for Logger {
 }
 
 pub fn init(verbose: bool) {
-    let file = gk_twitch::local_dir().and_then(|d| std::fs::File::create(d.join("glotzkiste.log")).ok()).map(Mutex::new);
+    let file =
+        gk_twitch::local_dir().and_then(|d| std::fs::File::create(d.join("glotzkiste.log")).ok()).map(Mutex::new);
     let level = if verbose { log::LevelFilter::Info } else { log::LevelFilter::Warn };
     if log::set_boxed_logger(Box::new(Logger { file, level })).is_ok() {
         log::set_max_level(level);

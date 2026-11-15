@@ -61,20 +61,18 @@ pub fn parse_master(text: &str) -> Vec<Variant> {
                 height,
                 fps: attr(rest, "FRAME-RATE").and_then(|f| f.parse().ok()).unwrap_or(0.0),
                 bandwidth: attr(rest, "BANDWIDTH").and_then(|b| b.parse().ok()).unwrap_or(0),
-                source: attr(rest, "IVS-VARIANT-SOURCE") == Some("source")
-                    || attr(rest, "VIDEO") == Some("chunked"),
+                source: attr(rest, "IVS-VARIANT-SOURCE") == Some("source") || attr(rest, "VIDEO") == Some("chunked"),
                 url: String::new(),
             });
-        } else if !line.is_empty() && !line.starts_with('#') {
-            if let Some(mut v) = pending.take() {
-                v.url = line.to_owned();
-                out.push(v);
-            }
+        } else if !line.is_empty()
+            && !line.starts_with('#')
+            && let Some(mut v) = pending.take()
+        {
+            v.url = line.to_owned();
+            out.push(v);
         }
     }
-    out.sort_by(|a, b| {
-        (b.height, b.fps as u32, b.bandwidth).cmp(&(a.height, a.fps as u32, a.bandwidth))
-    });
+    out.sort_by_key(|v| std::cmp::Reverse((v.height, v.fps as u32, v.bandwidth)));
     out
 }
 

@@ -1,0 +1,27 @@
+# cargo-deny configuration. Glotzkiste ships only permissively licensed
+# dependencies; CI enforces this list (AGENTS.md).
+# For "A OR B" expressions one allowed side is enough.
+
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+exclude-dev = true
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "ISC",
+    "0BSD",
+    "Unlicense",
+    "BSL-1.0",
+    "Unicode-3.0",
+    # webpki-roots: the Mozilla root certificate data.
+    "CDLA-Permissive-2.0",
+    # egui's built-in fonts.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]

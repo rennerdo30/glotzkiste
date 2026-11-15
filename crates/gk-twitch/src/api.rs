@@ -51,7 +51,8 @@ pub struct Client {
     device_id: String,
 }
 
-const USER_FIELDS: &str = "id login displayName profileImageURL(width: 70) stream { id title viewersCount game { displayName } }";
+const USER_FIELDS: &str =
+    "id login displayName profileImageURL(width: 70) stream { id title viewersCount game { displayName } }";
 
 fn parse_user(u: &Value) -> Option<ChannelInfo> {
     let s = |v: &Value| v.as_str().unwrap_or_default().to_owned();
@@ -103,20 +104,20 @@ impl Client {
                 Error::Refused(format!("{msg}: {detail}"))
             });
         }
-        if v.get("data").is_none() {
-            if let Some(m) = v["errors"][0]["message"].as_str() {
-                return Err(Error::Refused(m.to_owned()));
-            }
+        if v.get("data").is_none()
+            && let Some(m) = v["errors"][0]["message"].as_str()
+        {
+            return Err(Error::Refused(m.to_owned()));
         }
         Ok(v)
     }
 
     fn query(&self, q: &str) -> Result<Value> {
         let v = self.gql(&json!({ "query": q }))?;
-        if let Some(m) = v["errors"][0]["message"].as_str() {
-            if v["data"].is_null() {
-                return Err(Error::Refused(m.to_owned()));
-            }
+        if let Some(m) = v["errors"][0]["message"].as_str()
+            && v["data"].is_null()
+        {
+            return Err(Error::Refused(m.to_owned()));
         }
         Ok(v)
     }
@@ -128,8 +129,12 @@ impl Client {
 
     /// Several channels in one request (unknown logins are left out).
     pub fn channels(&self, logins: &[&str]) -> Result<Vec<ChannelInfo>> {
-        let list: Vec<String> =
-            logins.iter().map(|l| l.to_ascii_lowercase()).filter(|l| valid_login(l)).map(|l| format!("\"{l}\"")).collect();
+        let list: Vec<String> = logins
+            .iter()
+            .map(|l| l.to_ascii_lowercase())
+            .filter(|l| valid_login(l))
+            .map(|l| format!("\"{l}\""))
+            .collect();
         if list.is_empty() {
             return Ok(Vec::new());
         }
@@ -151,7 +156,7 @@ impl Client {
             .flatten()
             .filter_map(|e| parse_user(&e["node"]))
             .collect();
-        out.sort_by(|a, b| b.viewers.cmp(&a.viewers));
+        out.sort_by_key(|c| std::cmp::Reverse(c.viewers));
         Ok(out)
     }
 
