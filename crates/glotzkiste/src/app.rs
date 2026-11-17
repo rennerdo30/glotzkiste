@@ -87,6 +87,34 @@ struct Valve {
     test_at: Option<Instant>,
 }
 
+/// The "random streams" dialog.
+pub(crate) struct RandomDialog {
+    pub open: bool,
+    pub count: u32,
+    pub category: String,
+    /// Index into `ui::LANGUAGES` (0: any).
+    pub language: usize,
+    pub busy: bool,
+    pub message: Option<(bool, String)>,
+    pub categories: Vec<String>,
+    categories_asked: bool,
+}
+
+impl Default for RandomDialog {
+    fn default() -> Self {
+        Self {
+            open: false,
+            count: 10,
+            category: String::new(),
+            language: 0,
+            busy: false,
+            message: None,
+            categories: Vec::new(),
+            categories_asked: false,
+        }
+    }
+}
+
 pub struct App {
     pub(crate) options: Options,
     proxy: EventLoopProxy<UserEvent>,
@@ -117,6 +145,10 @@ pub struct App {
     followed_slot: Slot<Result<Vec<ChannelInfo>, String>>,
     pub(crate) followed_loading: bool,
     followed_at: Option<Instant>,
+    /// The "random streams" dialog (GK-12).
+    pub(crate) random: RandomDialog,
+    random_slot: Slot<Result<Vec<String>, String>>,
+    categories_slot: Slot<Vec<String>>,
     pub(crate) info: HashMap<String, ChannelInfo>,
     info_slot: Slot<Vec<ChannelInfo>>,
     info_at: Option<Instant>,
@@ -335,6 +367,9 @@ impl App {
             followed_slot: Arc::default(),
             followed_loading: false,
             followed_at: None,
+            random: RandomDialog::default(),
+            random_slot: Arc::default(),
+            categories_slot: Arc::default(),
             info: HashMap::new(),
             info_slot: Arc::default(),
             info_at: None,
@@ -385,6 +420,16 @@ impl App {
         };
         app.stats_open = stats_open;
         app.login.open = app.options.login;
+        if let Some(n) = app.options.random {
+            app.tabs.push(Tab::new(&format!("Random {n}"), vec![]));
+            app.active = app.tabs.len() - 1;
+            app.random.count = n;
+            app.random.category = app.options.random_category.clone().unwrap_or_default();
+            let lang = app.options.random_language.clone();
+            app.random.language =
+                crate::ui::LANGUAGES.iter().position(|(_, c)| c.is_some() && *c == lang.as_deref()).unwrap_or(0);
+            app.add_random();
+        }
         app
     }
 
@@ -965,6 +1010,54 @@ impl App {
         });
     }
 
+    /// The most watched categories, for the random-streams dialog (once).
+    pub(crate) fn fetch_categories(&mut self) {
+        if self.random.categories_asked {
+            return;
+        }
+        self.random.categories_asked = true;
+        let (slot, wake, client) = (self.categories_slot.clone(), self.wake(), self.client.clone());
+        self.pool.spawn(move || {
+            let Some(c) = client.lock().map(|c| c.clone()).ok() else { return };
+            match c.top_categories(40) {
+                Ok(list) => {
+                    if let Ok(mut s) = slot.lock() {
+                        *s = Some(list);
+                    }
+                    wake();
+                }
+                Err(e) => log::warn!("top categories: {e}"),
+            }
+        });
+    }
+
+    /// Adds random live channels to the current tab (GK-12): the dialog's
+    /// count, category and language; channels already open are left out.
+    pub(crate) fn add_random(&mut self) {
+        if self.random.busy {
+            return;
+        }
+        let count = self.random.count.clamp(1, 100) as usize;
+        let category = Some(self.random.category.trim().to_owned()).filter(|c| !c.is_empty());
+        let language = crate::ui::LANGUAGES.get(self.random.language).and_then(|(_, code)| *code);
+        let open: Vec<String> = self.tabs.iter().flat_map(|t| t.stream_channels()).collect();
+        self.random.busy = true;
+        self.random.message = None;
+        let (slot, wake, client) = (self.random_slot.clone(), self.wake(), self.client.clone());
+        self.pool.spawn(move || {
+            let r = client.lock().map(|c| c.clone()).map_err(|_| "busy".to_string()).and_then(|c| {
+                c.random_live(count, category.as_deref(), language, &open).map_err(|e| match e {
+                    gk_twitch::Error::NotFound => "No such category.".to_string(),
+                    e => e.to_string(),
+                })
+            });
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(r);
+            }
+            wake();
+        });
+    }
+
     /// Title, category and viewers for the streams in the tabs, every minute.
     fn refresh_info(&mut self) {
         if self.info_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
@@ -1061,6 +1154,40 @@ impl App {
             match r {
                 Ok(list) => self.followed = list,
                 Err(e) => log::warn!("followed channels: {e}"),
+            }
+        }
+        if let Some(list) = self.categories_slot.lock().ok().and_then(|mut s| s.take()) {
+            self.random.categories = list;
+        }
+        if let Some(r) = self.random_slot.lock().ok().and_then(|mut s| s.take()) {
+            self.random.busy = false;
+            match &r {
+                Ok(list) => log::info!("random streams: {}", list.len()),
+                Err(e) => log::warn!("random streams: {e}"),
+            }
+            match r {
+                Ok(list) if list.is_empty() => {
+                    self.random.message = Some((false, "Nothing live matches that.".into()));
+                }
+                Ok(list) => {
+                    let wanted = self.random.count.clamp(1, 100) as usize;
+                    for login in &list {
+                        self.add_channel(login);
+                    }
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        tab.apply(crate::layout::Preset::Grid, None);
+                    }
+                    let n = list.len();
+                    self.random.message = Some((
+                        true,
+                        if n < wanted {
+                            format!("Added {n} streams (only {n} live matched).")
+                        } else {
+                            format!("Added {n} stream{}.", if n == 1 { "" } else { "s" })
+                        },
+                    ));
+                }
+                Err(e) => self.random.message = Some((false, e)),
             }
         }
         if let Some(list) = self.info_slot.lock().ok().and_then(|mut s| s.take()) {

@@ -38,6 +38,9 @@ Usage: glotzkiste [options] [CHANNEL...]
   --pointer X,Y     With --smoke: a virtual mouse at X,Y (points), for snapshots
   --stats           Open the stats window
   --login           Open the login dialog
+  --random N        Open a new tab with N random live streams (up to 100)
+  --random-category NAME   With --random: from this category only
+  --random-language CODE   With --random: this broadcaster language (EN, DE, ...)
   --state-dir DIR   Keep the saved layout in DIR (smoke runs save only then)
 
 Channels on the command line open in a new tab next to the restored ones.
@@ -60,6 +63,10 @@ pub struct Options {
     pub state_dir: Option<std::path::PathBuf>,
     pub stats: bool,
     pub login: bool,
+    /// `--random N [--random-category NAME] [--random-language CODE]`.
+    pub random: Option<u32>,
+    pub random_category: Option<String>,
+    pub random_language: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Option<Options>, String> {
@@ -100,6 +107,24 @@ fn parse(args: &[String]) -> Result<Option<Options>, String> {
                 let s = it.next().ok_or("--pointer needs X,Y")?;
                 let (x, y) = s.split_once(',').ok_or("--pointer needs X,Y")?;
                 o.pointer = Some((x.parse().map_err(|_| "bad x")?, y.parse().map_err(|_| "bad y")?));
+            }
+            "--random" => {
+                o.random = Some(
+                    it.next()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .filter(|n| (1..=100).contains(n))
+                        .ok_or("--random needs a number from 1 to 100")?,
+                )
+            }
+            "--random-category" => {
+                o.random_category = Some(it.next().ok_or("--random-category needs a category")?.clone())
+            }
+            "--random-language" => {
+                let code = it.next().ok_or("--random-language needs a code such as EN")?.to_ascii_uppercase();
+                if !crate::ui::LANGUAGES.iter().any(|(_, c)| *c == Some(code.as_str())) {
+                    return Err(format!("unknown language {code}"));
+                }
+                o.random_language = Some(code);
             }
             "--state-dir" => o.state_dir = Some(it.next().ok_or("--state-dir needs a folder")?.into()),
             "--snapshot" => o.snapshot = Some(it.next().ok_or("--snapshot needs a file")?.into()),

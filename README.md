@@ -44,7 +44,7 @@ Windows 10 or 11, 64-bit, a CPU with AVX2 (most from 2015 on) and a GPU with Dir
 
 ## Use
 
-Type a channel name (or paste a channel link) into **Add channel…** and press Enter. Click a stream to hear it; the one you hear has a purple frame. Hover a stream for its quality, volume, chat and close buttons.
+Type a channel name (or paste a channel link) into **Add channel…** and press Enter, or press 🎲 to fill the tab with random live streams (any number, optionally one category and language). Click a stream to hear it; the one you hear has a purple frame. Hover a stream for its quality, volume, chat and close buttons.
 
 | Keys | |
 |---|---|

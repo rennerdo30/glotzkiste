@@ -81,6 +81,9 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, heigh
     if app.about_open {
         about::window(app, ui.ctx());
     }
+    if app.random.open {
+        random_dialog(app, ui.ctx());
+    }
     if app.stats_open || app.stats_on_tiles {
         // Numbers refresh twice a second while shown; closed, nothing ticks.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
@@ -201,6 +204,13 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.separator();
         add_channel_box(app, ui, 220.0, "bar");
+        if ui
+            .add(egui::Button::new(RichText::new("🎲").size(15.0)).frame(false))
+            .on_hover_text("Add random live streams")
+            .clicked()
+        {
+            app.random.open = !app.random.open;
+        }
 
         // Right side, laid out right to left.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -375,6 +385,118 @@ fn step(ui: &mut egui::Ui, n: usize, title: &str, add: impl FnOnce(&mut egui::Ui
         });
     });
     ui.add_space(6.0);
+}
+
+/// Broadcaster languages for the random-streams dialog: label and Twitch
+/// language code (`None`: any).
+pub const LANGUAGES: [(&str, Option<&str>); 14] = [
+    ("Any language", None),
+    ("English", Some("EN")),
+    ("German", Some("DE")),
+    ("Spanish", Some("ES")),
+    ("French", Some("FR")),
+    ("Portuguese", Some("PT")),
+    ("Italian", Some("IT")),
+    ("Polish", Some("PL")),
+    ("Russian", Some("RU")),
+    ("Turkish", Some("TR")),
+    ("Japanese", Some("JA")),
+    ("Korean", Some("KO")),
+    ("Chinese", Some("ZH")),
+    ("Arabic", Some("AR")),
+];
+
+/// "Add random streams": how many, from which category, in which language.
+fn random_dialog(app: &mut App, ctx: &egui::Context) {
+    app.fetch_categories();
+    let mut open = true;
+    egui::Window::new("Add random streams")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(380.0)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new("Fills the current tab with random live channels.").color(MUTED));
+            ui.add_space(6.0);
+            egui::Grid::new("random-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label("How many");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut app.random.count).range(1..=100).speed(0.3));
+                    for n in [5u32, 10, 25, 50] {
+                        if ui.small_button(n.to_string()).clicked() {
+                            app.random.count = n;
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label("Category");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.random.category)
+                            .hint_text("Any category")
+                            .desired_width(200.0),
+                    );
+                    let categories = app.random.categories.clone();
+                    ui.menu_button("▾", |ui| {
+                        ui.set_min_width(220.0);
+                        if ui.button("Any category").clicked() {
+                            app.random.category.clear();
+                            ui.close();
+                        }
+                        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                            if categories.is_empty() {
+                                ui.label(RichText::new("Loading…").color(MUTED));
+                            }
+                            for c in categories {
+                                if ui.button(&c).clicked() {
+                                    app.random.category = c;
+                                    ui.close();
+                                }
+                            }
+                        });
+                    })
+                    .response
+                    .on_hover_text("Most watched categories right now");
+                });
+                ui.end_row();
+                ui.label("Language");
+                let current = LANGUAGES.get(app.random.language).map_or("Any language", |l| l.0);
+                egui::ComboBox::from_id_salt("random-language").selected_text(current).width(200.0).show_ui(ui, |ui| {
+                    for (i, (label, _)) in LANGUAGES.iter().enumerate() {
+                        ui.selectable_value(&mut app.random.language, i, *label);
+                    }
+                });
+                ui.end_row();
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let label = if app.random.busy { "Looking…" } else { "🎲 Add streams" };
+                if ui.add_enabled(!app.random.busy, egui::Button::new(label)).clicked() {
+                    app.add_random();
+                }
+                if let Some((ok, m)) = &app.random.message {
+                    ui.label(RichText::new(m).color(if *ok { GOOD } else { BAD }));
+                }
+            });
+            if app.random.count > 30 && !app.random.category.trim().is_empty() {
+                ui.label(
+                    RichText::new("Twitch lists the top 30 live streams of a category to apps; more come from other categories only.")
+                        .color(MUTED)
+                        .size(12.0),
+                );
+            }
+            if app.random.count > 30 {
+                ui.label(
+                    RichText::new("Many streams load your GPUs' video decoders and your connection.")
+                        .color(MUTED)
+                        .size(12.0),
+                );
+            }
+        });
+    if !open {
+        app.random.open = false;
+    }
 }
 
 fn login_dialog(app: &mut App, ctx: &egui::Context) {

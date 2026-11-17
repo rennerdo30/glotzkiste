@@ -75,6 +75,26 @@ pub fn valid_login(login: &str) -> bool {
     (1..=25).contains(&login.len()) && login.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// A Twitch broadcaster language code (`EN`, `DE`, `ZH_HK`, ...).
+pub fn valid_language(code: &str) -> bool {
+    (2..=8).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphabetic() || b == b'_')
+}
+
+/// Fisher-Yates with a seed from the std hasher's random keys.
+fn shuffle<T>(v: &mut [T]) {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_usize(v.len());
+    let mut x = h.finish() | 1;
+    for i in (1..v.len()).rev() {
+        // xorshift64
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        v.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+}
+
 impl Client {
     pub fn new(http: Http, auth: Option<Auth>) -> Self {
         let device_id = auth.as_ref().and_then(|a| a.device_id.clone()).unwrap_or_else(|| crate::random_hex(32));
@@ -158,6 +178,90 @@ impl Client {
             .collect();
         out.sort_by_key(|c| std::cmp::Reverse(c.viewers));
         Ok(out)
+    }
+
+    /// The most watched categories right now (display names).
+    pub fn top_categories(&self, count: usize) -> Result<Vec<String>> {
+        let v = self.query(&format!(
+            "query {{ games(first: {}) {{ edges {{ node {{ displayName }} }} }} }}",
+            count.clamp(1, 100)
+        ))?;
+        Ok(v["data"]["games"]["edges"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e["node"]["displayName"].as_str().map(str::to_owned))
+            .collect())
+    }
+
+    /// Up to `count` random live channels (logins), optionally of one
+    /// category (its display name) and one broadcaster language (a Twitch
+    /// language code such as `EN` or `DE`), leaving out `skip`.
+    ///
+    /// Without a login Twitch lists only the first 30 streams of a list (the
+    /// next pages need an integrity token), so this asks for the top 30 of
+    /// each of the 14 most watched categories and the top 30 overall in one
+    /// request, or the top 30 of the chosen category, and picks at random.
+    pub fn random_live(
+        &self,
+        count: usize,
+        category: Option<&str>,
+        language: Option<&str>,
+        skip: &[String],
+    ) -> Result<Vec<String>> {
+        let options = match language {
+            Some(l) if valid_language(l) => {
+                format!(", options: {{broadcasterLanguages: [{}]}}", l.to_ascii_uppercase())
+            }
+            Some(_) => return Err(Error::NotFound),
+            None => String::new(),
+        };
+        let names: Vec<String> = match category {
+            Some(c) => vec![c.to_owned()],
+            // Twitch allows 15 root aliases: the top list and 14 categories.
+            None => self.top_categories(14)?,
+        };
+        let streams = format!("streams(first: 30{options}) {{ edges {{ node {{ broadcaster {{ login }} }} }} }}");
+        let mut parts = Vec::new();
+        let mut vars = serde_json::Map::new();
+        if category.is_none() {
+            parts.push(format!("top: {streams}"));
+        }
+        for (i, n) in names.iter().enumerate() {
+            parts.push(format!("g{i}: game(name: $n{i}) {{ {streams} }}"));
+            vars.insert(format!("n{i}"), Value::String(n.clone()));
+        }
+        let header: Vec<String> = (0..names.len()).map(|i| format!("$n{i}: String!")).collect();
+        let query = if header.is_empty() {
+            format!("query {{ {} }}", parts.join(" "))
+        } else {
+            format!("query({}) {{ {} }}", header.join(", "), parts.join(" "))
+        };
+        let v = self.gql(&json!({ "query": query, "variables": vars }))?;
+        let data = &v["data"];
+        if data.is_null() {
+            return Err(Error::Refused(v["errors"][0]["message"].as_str().unwrap_or("no data").to_owned()));
+        }
+        if category.is_some() && data["g0"].is_null() {
+            return Err(Error::NotFound);
+        }
+        let mut lists = vec![&data["top"]["edges"]];
+        lists.extend((0..names.len()).map(|i| &data[format!("g{i}").as_str()]["streams"]["edges"]));
+        let mut pool: Vec<String> = Vec::new();
+        for edges in lists {
+            for e in edges.as_array().into_iter().flatten() {
+                if let Some(l) = e["node"]["broadcaster"]["login"].as_str()
+                    && valid_login(l)
+                    && !skip.iter().any(|s| s == l)
+                    && !pool.iter().any(|p| p == l)
+                {
+                    pool.push(l.to_owned());
+                }
+            }
+        }
+        shuffle(&mut pool);
+        pool.truncate(count);
+        Ok(pool)
     }
 
     /// The playable variants of a live channel. Logged in, the playback token
@@ -254,6 +358,29 @@ fn usher_url(login: &str, sig: &str, token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn languages_are_codes_only() {
+        assert!(valid_language("EN"));
+        assert!(valid_language("zh_hk"));
+        assert!(!valid_language("E"));
+        assert!(!valid_language("EN]} x"));
+        assert!(!valid_language(""));
+    }
+
+    #[test]
+    fn shuffle_keeps_every_item() {
+        let mut v: Vec<u32> = (0..300).collect();
+        shuffle(&mut v);
+        let mut sorted = v.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..300).collect::<Vec<_>>());
+        assert_ne!(v, sorted, "300 items stayed in order");
+        let mut one = vec![7];
+        shuffle(&mut one);
+        assert_eq!(one, vec![7]);
+        shuffle::<u8>(&mut []);
+    }
 
     #[test]
     fn logins_are_checked_before_use() {

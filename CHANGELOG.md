@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Random streams** (🎲 next to the channel box): fill the current tab with any number of random live streams, optionally from one category and in one language; `--random N` (with `--random-category`, `--random-language`) does the same at start, handy for load tests (GK-12).
+
 ## 1.1.0
 
 - **GPU to GPU:** frames of streams on your other GPUs reach the window GPU to GPU through memory both GPUs share (DirectX 12 cross-adapter heap), without a CPU copy; the render thread does about 40 % less work with four streams on an integrated GPU. Where that is not available, frames are read back as before (GK-3).
