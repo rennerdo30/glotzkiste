@@ -452,7 +452,7 @@ pub fn bottleneck(status: &Status, s: &StreamStats, rates: &Rates, id: u64) -> O
     // workers skip late frames instead of dropping them).
     // Main GPU only: there is no copy step to blame (on another GPU the
     // copy is judged below).
-    let saturated = status.decode_on == DecodeOn::Gpu && load >= 95.0 && expected > 0.0 && shown < expected * 0.9;
+    let saturated = status.decode_on == DecodeOn::Gpu && load >= 90.0 && expected > 0.0 && shown < expected * 0.9;
     if dec_drops > 0.2 || decoded_short || saturated {
         let why = match status.decode_on {
             DecodeOn::Cpu => "CPU decoding too slow".to_owned(),
@@ -527,7 +527,10 @@ pub fn contents(ui: &mut egui::Ui, mut c: Ctx<'_>) {
         pill(ui, "Display", format!("{:.0} presents/s", r.presents_s), TEXT);
         // Every stream together: frames the video decoders deliver and
         // frames that reach the tiles, per second.
-        let decoding: f64 = c.stats.values().map(|s| s.decoded_fps).sum();
+        // mpv's per-stream estimate reads 0 for many streams; a tile cannot
+        // show more frames than were decoded, so each counts at least those.
+        let decoding: f64 =
+            c.stats.iter().map(|(id, s)| s.decoded_fps.max(r.tile_fps.get(id).copied().unwrap_or(0.0))).sum();
         let shown: f64 = r.tile_fps.values().sum();
         pill(ui, "Decoding", format!("{decoding:.0} frames/s · {shown:.0} shown · {} streams", c.stats.len()), GOOD);
         pill(

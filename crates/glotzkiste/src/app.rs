@@ -828,10 +828,12 @@ impl App {
             let now = drops.get(&g.luid).copied().unwrap_or(0);
             let before = self.valve.drops.insert(g.luid, now).unwrap_or(now);
             // Overloaded: hot for two samples with rising drops, or
-            // saturated (97 % or more). Late frames are skipped by the render
+            // saturated (92 % or more). Late frames are skipped by the render
             // workers rather than dropped, so drops alone missed a full
             // decoder holding every stream at 12 fps.
-            let saturated = g.decode_pct >= 97.0;
+            // (At 94 % the owner's 112-stream run still held the main
+            // GPU's streams at 21 of 30 fps.)
+            let saturated = g.decode_pct >= 92.0;
             if moved || self.valve.hot.get(&g.luid).copied().unwrap_or(0) < 2 || (now <= before && !saturated) {
                 continue;
             }
