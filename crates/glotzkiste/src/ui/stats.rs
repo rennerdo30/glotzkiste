@@ -447,12 +447,19 @@ pub fn bottleneck(status: &Status, s: &StreamStats, rates: &Rates, id: u64) -> O
     };
     let load = gpu.and_then(|l| rates.gpu_load.get(&l).copied()).unwrap_or(0.0);
     let decoded_short = s.decoded_fps > 0.0 && expected > 0.0 && s.decoded_fps < expected * 0.9;
-    if dec_drops > 0.2 || decoded_short {
+    // A saturated decoder behind a stream that falls short is the limit,
+    // even when mpv's estimate still reads the full rate (the render
+    // workers skip late frames instead of dropping them).
+    // Main GPU only: there is no copy step to blame (on another GPU the
+    // copy is judged below).
+    let saturated = status.decode_on == DecodeOn::Gpu && load >= 95.0 && expected > 0.0 && shown < expected * 0.9;
+    if dec_drops > 0.2 || decoded_short || saturated {
         let why = match status.decode_on {
             DecodeOn::Cpu => "CPU decoding too slow".to_owned(),
             _ => format!("{} decoder at {load:.0} %", status.decoder),
         };
-        return Some((Limit::Decoder, format!("{why}: {:.0} of {expected:.0} fps decoded", s.decoded_fps)));
+        let got = if saturated && !decoded_short { shown } else { s.decoded_fps };
+        return Some((Limit::Decoder, format!("{why}: {got:.0} of {expected:.0} fps")));
     }
     if matches!(status.decode_on, DecodeOn::Second(_)) {
         let copy_ms = rates.tile_copy_ms.get(&id).copied().unwrap_or(0.0);
@@ -911,6 +918,10 @@ mod tests {
         assert_eq!(limit(&st, &stats(60.0, 60.0), &rates(45.0)), Limit::Copy);
         // The same loss on the main GPU is the display.
         assert_eq!(limit(&playing("1080p60", DecodeOn::Gpu), &stats(60.0, 60.0), &rates(45.0)), Limit::Display);
+        // ... unless its decoder is saturated (mpv still estimates 60 fps).
+        let mut r = rates(12.0);
+        r.gpu_load.insert(MAIN, 99.0);
+        assert_eq!(limit(&playing("160p30", DecodeOn::Gpu), &stats(30.0, 30.0), &r), Limit::Decoder);
     }
 
     #[test]

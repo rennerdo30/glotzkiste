@@ -827,32 +827,55 @@ impl App {
         for g in &gpus {
             let now = drops.get(&g.luid).copied().unwrap_or(0);
             let before = self.valve.drops.insert(g.luid, now).unwrap_or(now);
-            if moved || self.valve.hot.get(&g.luid).copied().unwrap_or(0) < 2 || now <= before {
+            // Overloaded: hot for two samples with rising drops, or
+            // saturated (97 % or more). Late frames are skipped by the render
+            // workers rather than dropped, so drops alone missed a full
+            // decoder holding every stream at 12 fps.
+            let saturated = g.decode_pct >= 97.0;
+            if moved || self.valve.hot.get(&g.luid).copied().unwrap_or(0) < 2 || (now <= before && !saturated) {
                 continue;
             }
-            let Some((id, _)) = playing.iter().rev().find(|(id, st)| {
-                gpu_of(st.decode_on) == Some(g.luid) && !self.pinned.contains(id) && !recently(&self.valve.moved, *id)
-            }) else {
-                continue;
-            };
-            let target = placer.choose_except(Some(g.luid)).unwrap_or(DecodeOn::Cpu);
-            if target == DecodeOn::Cpu && self.valve.last_cpu.is_some_and(|t| t.elapsed() < Duration::from_secs(10)) {
-                continue;
+            // Up to three streams per step: newest first to a GPU with room;
+            // when none has room, the smallest (480p or less, cheap in
+            // software) to the CPU, the larger ones stay.
+            let mut on_gpu: Vec<&(u64, Status)> = playing
+                .iter()
+                .filter(|(id, st)| {
+                    gpu_of(st.decode_on) == Some(g.luid)
+                        && !self.pinned.contains(id)
+                        && !recently(&self.valve.moved, *id)
+                })
+                .collect();
+            on_gpu.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
+            let mut sent = 0;
+            for (id, st) in on_gpu {
+                if sent >= 3 {
+                    break;
+                }
+                let target = match placer.choose_except(Some(g.luid)) {
+                    Some(t) => t,
+                    None if st.video_height > 0 && st.video_height <= 480 => DecodeOn::Cpu,
+                    None => continue,
+                };
+                log::warn!(
+                    "{}: video decoder at {:.0} %: stream {id} ({}p) moves to {}",
+                    g.name,
+                    g.decode_pct,
+                    st.video_height,
+                    placer.name(target)
+                );
+                self.streams[id].send(Cmd::Decoder(target));
+                self.valve.moved.insert(*id, Instant::now());
+                self.valve.last_move = Some(Instant::now());
+                if target == DecodeOn::Cpu {
+                    self.valve.last_cpu = Some(Instant::now());
+                }
+                sent += 1;
             }
-            log::warn!(
-                "{}: video decoder at {:.0} % with dropped frames: stream {id} moves to {}",
-                g.name,
-                g.decode_pct,
-                placer.name(target)
-            );
-            self.streams[id].send(Cmd::Decoder(target));
-            self.valve.moved.insert(*id, Instant::now());
-            self.valve.last_move = Some(Instant::now());
-            if target == DecodeOn::Cpu {
-                self.valve.last_cpu = Some(Instant::now());
+            if sent > 0 {
+                self.valve.hot.insert(g.luid, 0);
+                moved = true;
             }
-            self.valve.hot.insert(g.luid, 0);
-            moved = true;
         }
 
         // Balancing (GK-2): streams go back toward the preferred GPUs. One
