@@ -115,9 +115,28 @@ const PLACE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Render workers on the main GPU: `GK_RENDER_WORKERS` (0 turns them off),
 /// else one per eight hardware threads, two to four.
+static GPU_COPY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static RENDER_WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Copy frames from other GPUs GPU to GPU (default) or read them back. For
+/// GPUs used from now on; `GK_BRIDGE=0` wins.
+pub fn set_gpu_copy(on: bool) {
+    GPU_COPY.store(on, Ordering::Relaxed);
+}
+
+/// Render workers on the main GPU (0: automatic) for presenters started from
+/// now on; `GK_RENDER_WORKERS` wins.
+pub fn set_render_workers(n: usize) {
+    RENDER_WORKERS.store(n, Ordering::Relaxed);
+}
+
 fn worker_count() -> usize {
     if let Some(n) = std::env::var("GK_RENDER_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()) {
         return n.min(8);
+    }
+    let set = RENDER_WORKERS.load(Ordering::Relaxed);
+    if set > 0 {
+        return set.min(8);
     }
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     (threads / 8).clamp(2, 4)
@@ -263,7 +282,7 @@ impl Presenter {
         let shared = self.shared.clone();
         // GPU to GPU unless turned off (GK_BRIDGE=0) or the main thread has
         // no shared fence; the worker falls back to read-back by itself.
-        let bridge_off = std::env::var("GK_BRIDGE").is_ok_and(|v| v == "0");
+        let bridge_off = std::env::var("GK_BRIDGE").is_ok_and(|v| v == "0") || !GPU_COPY.load(Ordering::Relaxed);
         let delivery = match self.main_fence {
             Some(main_fence) if !bridge_off => Delivery::Bridge { main_luid: self.luid, main_fence },
             _ => Delivery::Readback,

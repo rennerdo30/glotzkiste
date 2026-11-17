@@ -34,17 +34,28 @@ pub struct Placer {
     /// Streams decoding on each GPU at the last sample.
     streams_on: HashMap<Luid, u32>,
     busy: HashSet<Luid>,
+    /// The viewer turned the other GPUs off (settings): main GPU, then CPU.
+    others_off: bool,
 }
 
 impl Placer {
+    /// Use the other GPUs (default) or only the main one, for streams placed
+    /// from now on.
+    pub fn set_others(&mut self, on: bool) {
+        self.others_off = !on;
+    }
+
     pub fn new(main: Luid, gpus: Vec<Gpu>) -> Self {
         Self { main, gpus, ..Default::default() }
     }
 
     /// The GPUs in placement order: the others, then the main one.
     pub fn order(&self) -> Vec<&Gpu> {
-        let mut v: Vec<&Gpu> =
-            self.gpus.iter().filter(|g| g.luid != self.main && !self.bad.contains(&g.luid)).collect();
+        let mut v: Vec<&Gpu> = self
+            .gpus
+            .iter()
+            .filter(|g| g.luid != self.main && !self.bad.contains(&g.luid) && !self.others_off)
+            .collect();
         v.extend(self.gpus.iter().filter(|g| g.luid == self.main));
         v
     }

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Settings** (⚙ in the top bar): latency, highest automatic quality, decoding on other GPUs, GPU-to-GPU copy, render threads, daily update check and update channel; saved in `settings.json` beside the layout (GK-15).
 - **Random streams** (🎲 next to the channel box): fill the current tab with any number of random live streams, optionally from one category and in one language; `--random N` (with `--random-category`, `--random-language`) does the same at start, handy for load tests (GK-12).
 
 ## 1.1.0

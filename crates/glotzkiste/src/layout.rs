@@ -306,11 +306,16 @@ pub fn set_dir(dir: std::path::PathBuf) {
     let _ = DIR.set(dir);
 }
 
-fn path() -> Option<std::path::PathBuf> {
+/// Where the layout and the settings are kept.
+pub fn dir() -> Option<std::path::PathBuf> {
     match DIR.get() {
-        Some(d) => Some(d.join("layout.json")),
-        None => gk_twitch::config_dir().map(|d| d.join("layout.json")),
+        Some(d) => Some(d.clone()),
+        None => gk_twitch::config_dir(),
     }
+}
+
+fn path() -> Option<std::path::PathBuf> {
+    dir().map(|d| d.join("layout.json"))
 }
 
 pub fn load() -> Option<Saved> {

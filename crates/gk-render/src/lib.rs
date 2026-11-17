@@ -100,7 +100,7 @@ pub struct DeviceInfo {
 }
 
 #[cfg(windows)]
-pub use d3d::Presenter;
+pub use d3d::{Presenter, set_gpu_copy, set_render_workers};
 
 #[cfg(not(windows))]
 pub struct Presenter;

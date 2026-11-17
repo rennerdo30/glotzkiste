@@ -35,7 +35,9 @@ pub enum Outcome {
 }
 
 /// `force`: a check the viewer asked for (ignores the daily limit).
-fn check(force: bool) -> Result<Outcome, String> {
+/// `channel`: the viewer's choice (`stable`, `beta`; `None`: this
+/// version's); `GLOTZKISTE_UPDATE_CHANNEL` wins.
+fn check(force: bool, channel: Option<String>) -> Result<Outcome, String> {
     let off = if cfg!(debug_assertions) {
         Some("This is a development build; updates are off.")
     } else if std::env::var_os("GLOTZKISTE_NO_UPDATE").is_some() {
@@ -52,7 +54,7 @@ fn check(force: bool) -> Result<Outcome, String> {
     if !force && !gk_update::due(&stamp, SystemTime::now()) {
         return Ok(Outcome::Skipped);
     }
-    let setting = std::env::var("GLOTZKISTE_UPDATE_CHANNEL").ok();
+    let setting = std::env::var("GLOTZKISTE_UPDATE_CHANNEL").ok().or(channel);
     let channel = Channel::from_setting(setting.as_deref(), &current);
     let result = gk_update::check(&current, channel).map_err(|e| e.to_string());
     // A failed check still waits a day: no retry storm on a flaky network.
@@ -63,9 +65,10 @@ fn check(force: bool) -> Result<Outcome, String> {
     })
 }
 
-pub fn spawn_check(force: bool, done: impl FnOnce(Result<Outcome, String>) + Send + 'static) {
+pub fn spawn_check(force: bool, channel: Option<String>, done: impl FnOnce(Result<Outcome, String>) + Send + 'static) {
     let _ = std::thread::Builder::new().name("gk-update-check".into()).spawn(move || {
-        let r = catch_unwind(AssertUnwindSafe(|| check(force))).unwrap_or_else(|_| Err("update check crashed".into()));
+        let r = catch_unwind(AssertUnwindSafe(|| check(force, channel)))
+            .unwrap_or_else(|_| Err("update check crashed".into()));
         done(r);
     });
 }

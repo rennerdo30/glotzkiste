@@ -660,8 +660,22 @@ impl Control {
     fn pick(&self, variants: &[Variant], tile_height: u32) -> usize {
         match &self.settings.quality {
             Quality::Named(n) => variants.iter().position(|v| &v.name == n),
-            Quality::Auto => gk_twitch::playlist::pick(variants, tile_height.max(1), !self.busy())
-                .and_then(|p| variants.iter().position(|v| v.name == p.name)),
+            Quality::Auto => {
+                // Settings may cap automatic quality (a smaller tile still
+                // picks smaller).
+                // picks smaller). Variants above the cap are left out first,
+                // so the 60 fps preference cannot step over it.
+                let cap = crate::settings::max_auto_height();
+                let capped: Vec<Variant> = if cap > 0 {
+                    variants.iter().filter(|v| v.audio_only() || v.height <= cap).cloned().collect()
+                } else {
+                    Vec::new()
+                };
+                let pool = if capped.iter().any(|v| !v.audio_only()) { &capped[..] } else { variants };
+                let h = if cap > 0 { tile_height.min(cap) } else { tile_height };
+                gk_twitch::playlist::pick(pool, h.max(1), !self.busy())
+                    .and_then(|p| variants.iter().position(|v| v.name == p.name))
+            }
         }
         .unwrap_or(0)
     }

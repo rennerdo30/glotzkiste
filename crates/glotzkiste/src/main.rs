@@ -11,6 +11,7 @@ mod layout;
 mod libmpv;
 mod logger;
 mod placement;
+mod settings;
 mod stream;
 mod ui;
 mod update;

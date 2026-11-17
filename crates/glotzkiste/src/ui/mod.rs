@@ -84,6 +84,9 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, heigh
     if app.random.open {
         random_dialog(app, ui.ctx());
     }
+    if app.settings_open {
+        settings_window(app, ui.ctx());
+    }
     if app.stats_open || app.stats_on_tiles {
         // Numbers refresh twice a second while shown; closed, nothing ticks.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
@@ -220,6 +223,10 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 .clicked()
             {
                 app.about_open = !app.about_open;
+            }
+            if ui.add(egui::Button::new(RichText::new("⚙").size(16.0)).frame(false)).on_hover_text("Settings").clicked()
+            {
+                app.settings_open = !app.settings_open;
             }
             account_button(app, ui);
             if let Some(c) = app.update.found.clone() {
@@ -385,6 +392,110 @@ fn step(ui: &mut egui::Ui, n: usize, title: &str, add: impl FnOnce(&mut egui::Ui
         });
     });
     ui.add_space(6.0);
+}
+
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(10.0);
+    ui.label(RichText::new(title).font(crate::fonts::bold(15.0)).color(TEXT));
+    ui.add_space(2.0);
+}
+
+fn note(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).color(MUTED).size(12.0));
+}
+
+/// Settings (GK-15): changes apply at once (some to new streams or after a
+/// restart, as noted) and are saved.
+fn settings_window(app: &mut App, ctx: &egui::Context) {
+    use crate::settings::{HEIGHTS, Settings};
+    let mut open = true;
+    let before = app.settings.clone();
+    let mut latency = app.latency;
+    let mut check_now = false;
+    egui::Window::new("Settings").collapsible(false).resizable(false).default_width(460.0).open(&mut open).show(
+        ctx,
+        |ui| {
+            ui.set_width(460.0);
+            let s = &mut app.settings;
+            section(ui, "Playback");
+            egui::Grid::new("settings-playback").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label("Latency");
+                ui.horizontal(|ui| {
+                    for l in [Latency::Ultra, Latency::Low, Latency::Smooth] {
+                        ui.selectable_value(&mut latency, l, l.label());
+                    }
+                });
+                ui.end_row();
+                ui.label("Highest auto quality");
+                let current = HEIGHTS.iter().find(|(h, _)| *h == s.max_auto_height).map_or("Source", |h| h.1);
+                egui::ComboBox::from_id_salt("settings-height").selected_text(current).width(120.0).show_ui(ui, |ui| {
+                    for (h, label) in HEIGHTS {
+                        ui.selectable_value(&mut s.max_auto_height, h, label);
+                    }
+                });
+                ui.end_row();
+            });
+            note(ui, "Auto quality follows each tile's size; this caps it (saves bandwidth and decoder load).");
+
+            section(ui, "GPUs");
+            ui.checkbox(&mut s.other_gpus, "Decode on my other GPUs first (integrated ones too)");
+            note(ui, "Off: new streams decode on the GPU that draws the window, then the CPU.");
+            ui.checkbox(&mut s.gpu_copy, "Copy frames GPU to GPU");
+            note(ui, "Off: frames from other GPUs are read back by the CPU. For GPUs used from now on.");
+            ui.horizontal(|ui| {
+                ui.label("Render threads");
+                let label = if s.render_threads == 0 { "Automatic".to_owned() } else { s.render_threads.to_string() };
+                egui::ComboBox::from_id_salt("settings-threads").selected_text(label).width(110.0).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut s.render_threads, 0, "Automatic");
+                    for n in 1..=8u32 {
+                        ui.selectable_value(&mut s.render_threads, n, n.to_string());
+                    }
+                });
+                note(ui, "after a restart");
+            });
+
+            section(ui, "Updates");
+            ui.checkbox(&mut s.auto_update, "Look for updates once a day");
+            ui.horizontal(|ui| {
+                ui.label("Channel");
+                let label = match s.update_channel.as_str() {
+                    "stable" => "Stable",
+                    "beta" => "Beta",
+                    _ => "This version's",
+                };
+                egui::ComboBox::from_id_salt("settings-channel").selected_text(label).width(130.0).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut s.update_channel, String::new(), "This version's");
+                    ui.selectable_value(&mut s.update_channel, "stable".to_owned(), "Stable");
+                    ui.selectable_value(&mut s.update_channel, "beta".to_owned(), "Beta");
+                });
+                if ui.button("Check now").clicked() {
+                    check_now = true;
+                }
+            });
+
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                note(ui, "Saved automatically.");
+                if ui.small_button("Reset to defaults").clicked() {
+                    *s = Settings::default();
+                    latency = Latency::Ultra;
+                }
+            });
+        },
+    );
+    if latency != app.latency {
+        app.set_latency(latency);
+    }
+    if app.settings != before {
+        app.settings_changed();
+    }
+    if check_now {
+        app.check_updates(true);
+        app.about_open = true;
+    }
+    if !open {
+        app.settings_open = false;
+    }
 }
 
 /// Broadcaster languages for the random-streams dialog: label and Twitch

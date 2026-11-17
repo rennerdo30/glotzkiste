@@ -145,6 +145,9 @@ pub struct App {
     followed_slot: Slot<Result<Vec<ChannelInfo>, String>>,
     pub(crate) followed_loading: bool,
     followed_at: Option<Instant>,
+    /// The viewer's settings (GK-15) and their window.
+    pub(crate) settings: crate::settings::Settings,
+    pub(crate) settings_open: bool,
     /// The "random streams" dialog (GK-12).
     pub(crate) random: RandomDialog,
     random_slot: Slot<Result<Vec<String>, String>>,
@@ -336,6 +339,8 @@ impl App {
         let ctx = egui::Context::default();
         crate::ui::style(&ctx);
         let stats_open = options.stats;
+        let settings = crate::settings::Settings::load();
+        settings.apply();
         let mut app = Self {
             smoke_until: options.smoke.map(|s| Instant::now() + Duration::from_secs_f64(s)),
             options,
@@ -367,6 +372,8 @@ impl App {
             followed_slot: Arc::default(),
             followed_loading: false,
             followed_at: None,
+            settings,
+            settings_open: false,
             random: RandomDialog::default(),
             random_slot: Arc::default(),
             categories_slot: Arc::default(),
@@ -858,12 +865,12 @@ impl App {
 
     /// Looks for a newer release (daily on start, or `force` from About).
     pub(crate) fn check_updates(&mut self, force: bool) {
-        if self.update.checking || self.options.smoke.is_some() {
+        if self.update.checking || self.options.smoke.is_some() || (!force && !self.settings.auto_update) {
             return;
         }
         self.update.checking = true;
         let (slot, wake) = (self.update_slot.clone(), self.wake());
-        crate::update::spawn_check(force, move |r| {
+        crate::update::spawn_check(force, self.settings.channel(), move |r| {
             if let Ok(mut s) = slot.lock() {
                 *s = Some((force, r));
             }
@@ -1008,6 +1015,16 @@ impl App {
             }
             wake();
         });
+    }
+
+    /// After a change in the settings window: applies and saves them.
+    pub(crate) fn settings_changed(&mut self) {
+        self.settings.apply();
+        if let Ok(mut pl) = self.placer.lock() {
+            pl.set_others(self.settings.other_gpus);
+        }
+        let s = self.settings.clone();
+        self.pool.spawn(move || s.save());
     }
 
     /// The most watched categories, for the random-streams dialog (once).
@@ -1496,6 +1513,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_luid = info.luid;
                 if let Ok(mut pl) = self.placer.lock() {
                     *pl = crate::placement::Placer::new(info.luid, crate::gpu::adapters());
+                    pl.set_others(self.settings.other_gpus);
                 }
                 p.set_clear_color(crate::ui::BG_LINEAR);
                 self.presenter = Some(Arc::new(p));
