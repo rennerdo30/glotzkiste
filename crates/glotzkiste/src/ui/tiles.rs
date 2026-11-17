@@ -54,6 +54,8 @@ struct Behavior<'a> {
     grid_tiles: HashMap<TileId, (u32, u32)>,
     /// The cell size while the grid is drawn packed.
     packed_cell: Option<egui::Vec2>,
+    /// Tiles are gliding to new places: streams keep their render size.
+    animating: bool,
 }
 
 /// A demo channel's display name ("~aurora" -> "Aurora").
@@ -98,6 +100,9 @@ impl Behavior<'_> {
             pos2(px[0] as f32 / ppp, px[1] as f32 / ppp),
             pos2(px[2] as f32 / ppp, px[3] as f32 / ppp),
         );
+        if !self.animating {
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::NULL.with(("tile-rect", tile)), rect));
+        }
         let handle = self.streams.get(&p.id);
         let st = handle.map(|s| s.status()).unwrap_or_default();
         let painter = ui.painter().clone();
@@ -109,8 +114,19 @@ impl Behavior<'_> {
                 Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
-            self.videos.push(VideoTile { id: p.id, rect_px: px });
-            self.heights.push((p.id, (px[3] - px[1]).max(1) as u32));
+            // While tiles glide, the stream keeps rendering at its settled
+            // size (scaled): no texture remade and no quality switch per
+            // animation frame.
+            let key = egui::Id::NULL.with(("tile-px", tile));
+            let own = ((px[2] - px[0]).max(1) as u32, (px[3] - px[1]).max(1) as u32);
+            let render = if self.animating {
+                ui.ctx().data(|d| d.get_temp::<(u32, u32)>(key))
+            } else {
+                ui.ctx().data_mut(|d| d.insert_temp(key, own));
+                None
+            };
+            self.videos.push(VideoTile { id: p.id, rect_px: px, render });
+            self.heights.push((p.id, render.map_or(own.1, |r| r.1)));
         }
         let audible = self.audio.as_deref() == Some(p.channel.as_str());
         if let (Some(rates), Some(h)) = (self.overlay, handle) {
@@ -185,21 +201,47 @@ impl Behavior<'_> {
             if r.drag_started() {
                 let cell = self
                     .packed_cell
-                    .unwrap_or(vec2(rect.width() / span.0 as f32, rect.height() / span.1 as f32))
+                    .unwrap_or(vec2(
+                        (rect.width() - (span.0 - 1) as f32 * 3.0) / span.0 as f32,
+                        (rect.height() - (span.1 - 1) as f32 * 3.0) / span.1 as f32,
+                    ))
                     .max(vec2(40.0, 40.0));
-                ui.ctx().data_mut(|d| d.insert_temp(key, (span, cell)));
+                ui.ctx().data_mut(|d| d.insert_temp(key, (span, cell, rect.min)));
             }
+            // While dragging only an outline shows the new size; the grid
+            // changes once, on release (no re-layout per pointer move).
             if r.dragged()
-                && let Some(((w0, h0), cell)) = ui.ctx().data(|d| d.get_temp::<((u32, u32), egui::Vec2)>(key))
+                && let Some(((w0, h0), cell, origin)) =
+                    ui.ctx().data(|d| d.get_temp::<((u32, u32), egui::Vec2, Pos2)>(key))
                 && let (Some(now), Some(from)) =
                     (ui.ctx().pointer_interact_pos(), ui.input(|i| i.pointer.press_origin()))
             {
                 let d = now - from;
-                let w = ((w0 as f32 * cell.x + d.x) / cell.x).round().clamp(1.0, crate::layout::MAX_SPAN as f32) as u32;
-                let h = ((h0 as f32 * cell.y + d.y) / cell.y).round().clamp(1.0, crate::layout::MAX_SPAN as f32) as u32;
-                if (w, h) != span {
-                    self.acts.push(Act::Span(tile, w, h));
-                }
+                let step = cell + vec2(3.0, 3.0);
+                let max = crate::layout::MAX_SPAN as f32;
+                let w = ((w0 as f32 * step.x + d.x) / step.x).round().clamp(1.0, max) as u32;
+                let h = ((h0 as f32 * step.y + d.y) / step.y).round().clamp(1.0, max) as u32;
+                ui.ctx().data_mut(|dm| dm.insert_temp(egui::Id::NULL.with(("grip-to", tile)), (w, h)));
+                let ghost = Rect::from_min_size(origin, vec2(w as f32 * step.x - 3.0, h as f32 * step.y - 3.0));
+                let fg = ui
+                    .ctx()
+                    .layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::NULL.with("grip-ghost")));
+                fg.rect_filled(ghost, 4.0, Color32::from_rgba_unmultiplied(145, 70, 255, 40));
+                fg.rect_stroke(ghost, 4.0, egui::Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
+                fg.text(
+                    ghost.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{w} × {h}"),
+                    crate::fonts::bold(22.0),
+                    TEXT,
+                );
+            }
+            if r.drag_stopped()
+                && let Some((w, h)) =
+                    ui.ctx().data_mut(|d| d.remove_temp::<(u32, u32)>(egui::Id::NULL.with(("grip-to", tile))))
+                && (w, h) != span
+            {
+                self.acts.push(Act::Span(tile, w, h));
             }
             if r.double_clicked() && span != (1, 1) {
                 self.acts.push(Act::Span(tile, 1, 1));
@@ -601,30 +643,73 @@ fn draw_packed(b: &mut Behavior, tab: &mut crate::layout::Tab, ui: &mut egui::Ui
         None => (full, None),
     };
     let spans: Vec<(u32, u32)> = p.grid.iter().map(|id| tab.span_of(*id)).collect();
-    let (cols, rows, pos) = crate::layout::pack(&spans, (body.width(), body.height()));
+    // The column count holds while one tile changes size (unless another
+    // count is clearly better), so the grid does not reshuffle.
+    let cols_key = egui::Id::NULL.with("packed-cols");
+    let prev = ui.ctx().data(|d| d.get_temp::<u32>(cols_key));
+    let (cols, rows, pos) = crate::layout::pack_near(&spans, (body.width(), body.height()), prev);
+    ui.ctx().data_mut(|d| d.insert_temp(cols_key, cols));
     let cell = vec2((body.width() + gap) / cols.max(1) as f32 - gap, (body.height() + gap) / rows.max(1) as f32 - gap);
     b.packed_cell = Some(cell);
-    let mut draw = |b: &mut Behavior, tab: &mut crate::layout::Tab, id: TileId, rect: Rect| {
-        if let Some(egui_tiles::Tile::Pane(pane)) = tab.tree.tiles.get_mut(id) {
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("packed", id)));
-            child.set_clip_rect(rect);
-            let _ = egui_tiles::Behavior::pane_ui(b, &mut child, id, pane);
-        }
-    };
+    let mut targets: Vec<(TileId, Rect)> = Vec::new();
     for ((id, (w, h)), (x, y)) in p.grid.iter().zip(&spans).zip(&pos) {
         let (w, h) = (w.min(&cols), h);
         let min = body.min + vec2(*x as f32 * (cell.x + gap), *y as f32 * (cell.y + gap));
         let size = vec2(*w as f32 * cell.x + (*w - 1) as f32 * gap, *h as f32 * cell.y + (*h - 1) as f32 * gap);
-        draw(b, tab, *id, Rect::from_min_size(min, size));
+        targets.push((*id, Rect::from_min_size(min, size)));
     }
     if let Some((rect, chats)) = chats {
         let n = chats.len().max(1) as f32;
         let h = (rect.height() - gap * (n - 1.0)) / n;
         for (i, id) in chats.iter().enumerate() {
             let min = rect.min + vec2(0.0, i as f32 * (h + gap));
-            draw(b, tab, *id, Rect::from_min_size(min, vec2(rect.width(), h)));
+            targets.push((*id, Rect::from_min_size(min, vec2(rect.width(), h))));
         }
     }
+    // Tiles glide to their new places (200 ms, eased) instead of jumping.
+    let now = ui.input(|i| i.time);
+    let mut moving = false;
+    let shown: Vec<(TileId, Rect)> = targets
+        .into_iter()
+        .map(|(id, to)| {
+            let key = egui::Id::NULL.with(("glide", id));
+            let state = ui.ctx().data(|d| d.get_temp::<(Rect, Rect, f64)>(key));
+            let (from, target, start) = match state {
+                Some((from, target, start)) if target == to => (from, target, start),
+                Some((from, target, start)) => (glide_at(from, target, start, now), to, now),
+                // First packed frame: glide from where the plain grid had it.
+                None => match ui.ctx().data(|d| d.get_temp::<Rect>(egui::Id::NULL.with(("tile-rect", id)))) {
+                    Some(last) if last != to => (last, to, now),
+                    _ => (to, to, now),
+                },
+            };
+            ui.ctx().data_mut(|d| d.insert_temp(key, (from, target, start)));
+            let r = glide_at(from, target, start, now);
+            moving |= r != target;
+            (id, r)
+        })
+        .collect();
+    if moving {
+        ui.ctx().request_repaint();
+    }
+    b.animating = moving;
+    for (id, rect) in shown {
+        if let Some(egui_tiles::Tile::Pane(pane)) = tab.tree.tiles.get_mut(id) {
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("packed", id)));
+            child.set_clip_rect(rect);
+            let _ = egui_tiles::Behavior::pane_ui(b, &mut child, id, pane);
+        }
+    }
+}
+
+/// Where a gliding tile is at `now` (smoothstep over 200 ms).
+fn glide_at(from: Rect, to: Rect, start: f64, now: f64) -> Rect {
+    let t = ((now - start) / 0.2).clamp(0.0, 1.0) as f32;
+    if t >= 1.0 {
+        return to;
+    }
+    let e = t * t * (3.0 - 2.0 * t);
+    Rect::from_min_max(from.min.lerp(to.min, e), from.max.lerp(to.max, e))
 }
 
 pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, heights: &mut Vec<(u64, u32)>) {
@@ -672,6 +757,7 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
         decode_menu,
         grid_tiles,
         packed_cell: None,
+        animating: false,
     };
     app.content_rect = ui.max_rect();
     let Some(tab) = app.tabs.get_mut(active) else { return };

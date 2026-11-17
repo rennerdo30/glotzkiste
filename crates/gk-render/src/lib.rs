@@ -26,11 +26,17 @@ pub struct VideoTile {
     pub id: u64,
     /// x0, y0, x1, y1.
     pub rect_px: [i32; 4],
+    /// Render at this size instead of the rect's (the tile is moving: the
+    /// stream keeps its texture and is scaled until the tile settles).
+    pub render: Option<(u32, u32)>,
 }
 
 impl VideoTile {
     pub fn size(&self) -> (u32, u32) {
-        ((self.rect_px[2] - self.rect_px[0]).max(1) as u32, (self.rect_px[3] - self.rect_px[1]).max(1) as u32)
+        self.render.unwrap_or((
+            (self.rect_px[2] - self.rect_px[0]).max(1) as u32,
+            (self.rect_px[3] - self.rect_px[1]).max(1) as u32,
+        ))
     }
 }
 

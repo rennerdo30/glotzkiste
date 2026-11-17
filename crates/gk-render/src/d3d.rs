@@ -113,6 +113,9 @@ pub struct Presenter {
 /// stream (normally a few milliseconds).
 const PLACE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How often unfinished worker frames are looked at again.
+const READY_POLL: Duration = Duration::from_millis(2);
+
 /// Render workers on the main GPU: `GK_RENDER_WORKERS` (0 turns them off),
 /// else one per eight hardware threads, two to four.
 static GPU_COPY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -681,10 +684,15 @@ impl Renderer {
                     if r.pending() || shared.video_dirty.load(Ordering::Acquire) {
                         break;
                     }
-                    let deadline = match (self.anim_deadline(), self.video_deadline()) {
+                    let mut deadline = match (self.anim_deadline(), self.video_deadline()) {
                         (Some(a), Some(v)) => Some(a.min(v)),
                         (a, v) => a.or(v),
                     };
+                    // Worker frames the GPU has not finished yet: look again
+                    // shortly (never wait on the GPU for them).
+                    if self.linked.values().any(|l| l.ready.is_some()) {
+                        deadline = Some(deadline.map_or(READY_POLL, |d| d.min(READY_POLL)));
+                    }
                     match deadline {
                         Some(d) => {
                             let (g, t) = shared.wake.wait_timeout(r, d).unwrap_or_else(|p| p.into_inner());
@@ -796,6 +804,9 @@ impl Renderer {
             if poked && self.collect_workers(stats) {
                 draw = true;
             }
+            if self.promote_ready() {
+                draw = true;
+            }
             // 4. Animations whose frame changed.
             let now = self.now_ms();
             for (id, shown) in self.visible_anims.iter_mut() {
@@ -863,6 +874,25 @@ impl Renderer {
     /// Takes what the render workers finished: frames in shared textures
     /// (main GPU) and read-back frames to upload (other GPUs). True if a
     /// visible one changed.
+    /// Shows the newest worker frames whose GPU work is finished. A frame
+    /// still in flight (its decoder or GPU is busy) waits and the previous
+    /// one stays on screen: one slow stream never holds back the present
+    /// of all the others. True if a visible tile changed.
+    fn promote_ready(&mut self) -> bool {
+        let mut changed = false;
+        for (id, l) in self.linked.iter_mut() {
+            let Some((i, value)) = l.ready else { continue };
+            let Some(f) = self.worker_fences.get(&l.worker) else { continue };
+            // SAFETY: reading a fence value.
+            if unsafe { f.GetCompletedValue() } >= value {
+                l.ready = None;
+                l.shown = Some(i);
+                changed |= self.videos.iter().any(|v| v.id == *id);
+            }
+        }
+        changed
+    }
+
     fn collect_workers(&mut self, stats: &Stats) -> bool {
         let workers = self.shared.workers.lock().map(|a| a.clone()).unwrap_or_default();
         let mut frames = Vec::new();
@@ -1133,18 +1163,6 @@ impl Renderer {
             }
             let Some((tex, rtv)) = self.target.clone() else { return Ok(()) };
             self.context.ClearRenderTargetView(&rtv, &self.clear);
-            // Frames from render workers: this GPU waits until the worker
-            // finished drawing them (no CPU wait).
-            if let Some((ctx4, _)) = &self.fence {
-                for l in self.linked.values_mut() {
-                    if let Some((i, value)) = l.ready.take()
-                        && let Some(f) = self.worker_fences.get(&l.worker)
-                    {
-                        let _ = ctx4.Wait(f, value);
-                        l.shown = Some(i);
-                    }
-                }
-            }
             let now = self.now_ms();
             let surfaces = &self.surfaces;
             let remotes = &self.remotes;

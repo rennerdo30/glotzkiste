@@ -217,9 +217,19 @@ pub fn run(options: Options) -> i32 {
         log::error!("event loop: {e}");
         return 1;
     }
+    // Written here, synchronously: a save still running on a worker would
+    // be cut off by the exit below.
+    app.saved_json.clear();
     app.save_now();
-    app.streams.clear();
-    app.exit_code
+    if app.persist {
+        app.settings.save();
+    }
+    // Closing is instant: the layout and settings are saved; tearing down
+    // every player, render context and worker one by one (seconds with a
+    // hundred streams) would only keep a closed app alive. Windows frees
+    // the rest when the process ends.
+    log::logger().flush();
+    std::process::exit(app.exit_code)
 }
 
 /// Checks the token and attaches the browser identity (user agent from the
@@ -1645,7 +1655,16 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // Gone from the screen at once; the process ends right after.
+                if let Some(w) = &self.window {
+                    w.set_visible(false);
+                }
+                if let Some(w) = &self.stats_win {
+                    w.window.set_visible(false);
+                }
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 if let Some(p) = &self.presenter {
                     p.resize(size.width, size.height);

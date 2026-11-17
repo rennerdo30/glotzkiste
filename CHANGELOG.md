@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Smooth under load:** the window no longer waits on the GPU for streams whose newest frame is not finished yet (a full video decoder used to hold back every present: a 110-stream test showed 12 presents/s); such a stream shows its previous frame for a moment instead (GK-20).
+- **Closing is instant**, also with a hundred streams: the layout and settings are saved, the window disappears and the process ends without tearing every player down one by one (GK-21).
+- Stats: the top row shows the frames decoded per second over all streams, and how many reach the tiles.
+- Resizing a grid tile shows an outline while dragging and changes the grid once on release; the tiles glide to their new places and keep their render size while they move (GK-16).
 - **Resize one grid tile:** in a grid, drag a tile's bottom-right corner to make it span up to 4×4 cells; the other tiles flow around it, and double-clicking the corner makes it one cell again. A layout preset resets the sizes (GK-16).
 - **Several chat panels:** Layout → "+ Chat of …" or "+ Combined chat" stacks more chat panels in the column on the right; layout presets keep every chat panel (GK-17).
 - **Layout import and export** (Layout menu): save a tab as a `.json` file and open it again as a new tab, also on another PC (GK-18).

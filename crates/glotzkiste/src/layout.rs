@@ -118,6 +118,17 @@ pub fn pack(spans: &[(u32, u32)], size: (f32, f32)) -> (u32, u32, Vec<(u32, u32)
     best
 }
 
+/// Like [`pack`], but keeps `prev` columns unless another count gives the
+/// videos clearly (15 %) more room: a resize does not reshuffle the grid.
+pub fn pack_near(spans: &[(u32, u32)], size: (f32, f32), prev: Option<u32>) -> (u32, u32, Vec<(u32, u32)>) {
+    let best = pack(spans, size);
+    let max_w = spans.iter().map(|s| s.0).max().unwrap_or(1).max(1);
+    let Some(prev) = prev.filter(|p| *p >= max_w && *p != best.0) else { return best };
+    let score = |cols: u32, rows: u32| (size.0 / cols as f32).min(size.1 / rows.max(1) as f32 * 16.0 / 9.0);
+    let (pos, rows) = first_fit(spans, prev);
+    if score(prev, rows) * 1.15 >= score(best.0, best.1) { (prev, rows, pos) } else { best }
+}
+
 fn first_fit(spans: &[(u32, u32)], cols: u32) -> (Vec<(u32, u32)>, u32) {
     let mut used: Vec<Vec<bool>> = Vec::new();
     let mut out = Vec::with_capacity(spans.len());
@@ -594,6 +605,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn packing_keeps_its_columns_when_close() {
+        let four = [(1, 1); 4];
+        let (c, _, _) = pack(&four, (1600.0, 900.0));
+        assert_eq!(c, 2);
+        // A tile grows: three columns would be best, but two are kept while
+        // they give nearly as much room.
+        let grown = [(2, 1), (1, 1), (1, 1), (1, 1)];
+        let (best, _, _) = pack(&grown, (1600.0, 900.0));
+        let (kept, rows, pos) = pack_near(&grown, (1600.0, 900.0), Some(2));
+        assert!(kept == 2 || kept == best, "{kept} {best}");
+        assert_eq!(pos.len(), 4);
+        assert!(rows >= 2);
+        // A previous count narrower than the widest tile is ignored.
+        assert_eq!(pack_near(&[(3, 1)], (1600.0, 900.0), Some(2)).0, 3);
     }
 
     #[test]

@@ -518,6 +518,11 @@ pub fn contents(ui: &mut egui::Ui, mut c: Ctx<'_>) {
             );
         };
         pill(ui, "Display", format!("{:.0} presents/s", r.presents_s), TEXT);
+        // Every stream together: frames the video decoders deliver and
+        // frames that reach the tiles, per second.
+        let decoding: f64 = c.stats.values().map(|s| s.decoded_fps).sum();
+        let shown: f64 = r.tile_fps.values().sum();
+        pill(ui, "Decoding", format!("{decoding:.0} frames/s · {shown:.0} shown · {} streams", c.stats.len()), GOOD);
         pill(
             ui,
             "UI",
