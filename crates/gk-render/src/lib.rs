@@ -108,5 +108,19 @@ pub struct DeviceInfo {
 #[cfg(windows)]
 pub use d3d::{Presenter, set_gpu_copy, set_render_workers};
 
+/// Registers the calling thread with the Windows multimedia scheduler as a
+/// playback thread (MMCSS "Playback"): it keeps its slice of CPU time while
+/// the window is in the background. For the render thread and workers.
+#[cfg(windows)]
+pub(crate) fn playback_thread() {
+    use windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
+    let mut index = 0u32;
+    // SAFETY: a static task name and a valid out value; the registration
+    // ends with the thread.
+    if let Err(e) = unsafe { AvSetMmThreadCharacteristicsW(windows::core::w!("Playback"), &mut index) } {
+        log::info!("multimedia scheduler: {e}");
+    }
+}
+
 #[cfg(not(windows))]
 pub struct Presenter;

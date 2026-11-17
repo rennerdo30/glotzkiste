@@ -71,6 +71,11 @@ struct StatsWindow {
 }
 
 /// Moves streams off a full GPU video decoder.
+/// Moved within the last minute.
+fn recently(moved: &HashMap<u64, Instant>, id: u64) -> bool {
+    moved.get(&id).is_some_and(|t| t.elapsed() < Duration::from_secs(60))
+}
+
 #[derive(Default)]
 struct Valve {
     /// Samples in a row with the decoder at 90 % or more, per GPU.
@@ -82,6 +87,10 @@ struct Valve {
     checked: Option<Instant>,
     /// Samples in a row a stream on another GPU decoded in software.
     no_hw: HashMap<u64, u32>,
+    /// When the valve or the balancing last moved each stream: a stream is
+    /// not moved again for a minute (a move that failed under load used to
+    /// be retried every two seconds).
+    moved: HashMap<u64, Instant>,
     /// Test hook (`GK_TEST_MOVE=<seconds>`): then the first playing stream
     /// moves to the next GPU.
     test_at: Option<Instant>,
@@ -753,6 +762,7 @@ impl App {
             .collect();
         playing.sort_by_key(|(id, _)| *id);
         self.pinned.retain(|id| self.streams.contains_key(id));
+        self.valve.moved.retain(|id, _| self.streams.contains_key(id));
         let mut streams_on: HashMap<(u32, i32), u32> = HashMap::new();
         for (_, st) in &playing {
             if let Some(l) = gpu_of(st.decode_on) {
@@ -820,9 +830,9 @@ impl App {
             if moved || self.valve.hot.get(&g.luid).copied().unwrap_or(0) < 2 || now <= before {
                 continue;
             }
-            let Some((id, _)) =
-                playing.iter().rev().find(|(id, st)| gpu_of(st.decode_on) == Some(g.luid) && !self.pinned.contains(id))
-            else {
+            let Some((id, _)) = playing.iter().rev().find(|(id, st)| {
+                gpu_of(st.decode_on) == Some(g.luid) && !self.pinned.contains(id) && !recently(&self.valve.moved, *id)
+            }) else {
                 continue;
             };
             let target = placer.choose_except(Some(g.luid)).unwrap_or(DecodeOn::Cpu);
@@ -836,6 +846,7 @@ impl App {
                 placer.name(target)
             );
             self.streams[id].send(Cmd::Decoder(target));
+            self.valve.moved.insert(*id, Instant::now());
             self.valve.last_move = Some(Instant::now());
             if target == DecodeOn::Cpu {
                 self.valve.last_cpu = Some(Instant::now());
@@ -854,7 +865,8 @@ impl App {
             return;
         }
         let load = |l: (u32, i32)| gpus.iter().find(|g| g.luid == l).map_or(0.0, |g| g.decode_pct);
-        let mut candidates: Vec<&(u64, Status)> = playing.iter().filter(|(id, _)| !self.pinned.contains(id)).collect();
+        let mut candidates: Vec<&(u64, Status)> =
+            playing.iter().filter(|(id, _)| !self.pinned.contains(id) && !recently(&self.valve.moved, *id)).collect();
         // Worst placed first (CPU, then the main GPU, ...), newest first.
         candidates.sort_by_key(|(id, st)| (std::cmp::Reverse(placer.rank(st.decode_on)), std::cmp::Reverse(*id)));
         for (id, st) in candidates {
@@ -873,6 +885,7 @@ impl App {
                 placer.name(to)
             );
             self.streams[id].send(Cmd::Decoder(to));
+            self.valve.moved.insert(*id, Instant::now());
             self.valve.last_move = Some(Instant::now());
             break;
         }

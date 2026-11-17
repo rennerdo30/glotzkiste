@@ -457,6 +457,12 @@ impl Bridge {
     /// Before drawing into `t.tex`: makes the D3D11 GPU wait until the last
     /// copy out of it is done. False if the next slot's previous copy has
     /// not finished (skip this frame's copy then).
+    /// The stream's last frame is not through both copies yet.
+    pub fn behind(&self, t: &Target) -> bool {
+        // SAFETY: reading a fence value.
+        t.last > 0 && unsafe { self.done.GetCompletedValue() } < t.last
+    }
+
     pub fn begin(&self, t: &Target) -> bool {
         // SAFETY: fences of this bridge.
         unsafe {

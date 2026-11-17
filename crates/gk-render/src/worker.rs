@@ -181,6 +181,7 @@ impl Worker {
         let thread = std::thread::Builder::new()
             .name(format!("gk-render-{index}"))
             .spawn(move || {
+                crate::playback_thread();
                 let setup = device_on(luid).and_then(|(device, context)| {
                     let (mut fences, mut bridge) = (None, None);
                     match delivery {
@@ -333,6 +334,8 @@ struct RingTarget {
     size: (u32, u32),
     generation: u64,
     next: usize,
+    /// Fence value of the last frame handed over.
+    last: u64,
 }
 
 enum Target {
@@ -407,7 +410,7 @@ fn ring_target(device: &ID3D11Device, size: (u32, u32), generation: u64) -> wind
         // SAFETY: a texture created with MISC_SHARED.
         *h = unsafe { t.cast::<IDXGIResource>()?.GetSharedHandle()? }.0 as usize;
     }
-    Ok((RingTarget { tex, size, generation, next: 0 }, Ring { generation, size, handles, nt: false }))
+    Ok((RingTarget { tex, size, generation, next: 0, last: 0 }, Ring { generation, size, handles, nt: false }))
 }
 
 /// Reads a finished copy: tightly packed RGBA rows, or `None` while that
@@ -658,6 +661,14 @@ fn run(
             match s.target.as_mut() {
                 Some(Target::Ring(t)) => {
                     let Some(f) = fences.as_mut() else { continue };
+                    // One unfinished frame per stream at most: while the GPU
+                    // (or the decoder it waits for) is behind, this frame is
+                    // skipped instead of queued. An unbounded queue made the
+                    // driver block this thread and starved the window.
+                    // SAFETY: reading this worker's fence.
+                    if t.last > 0 && unsafe { f.own.GetCompletedValue() } < t.last {
+                        continue;
+                    }
                     let i = t.next;
                     let released = shared
                         .released
@@ -689,6 +700,7 @@ fn run(
                         let _ = f.context.Signal(&f.own, f.value);
                         context.Flush();
                     }
+                    t.last = f.value;
                     if let Ok(mut p) = shared.published.lock() {
                         let redraw = s.pending_kind == FrameKind::Redraw;
                         p.insert(
@@ -701,6 +713,10 @@ fn run(
                 }
                 Some(Target::Bridge(t)) => {
                     let Some(b) = bridge.as_mut() else { continue };
+                    // One unfinished frame per stream (see the main-GPU case).
+                    if b.behind(t) {
+                        continue;
+                    }
                     let slot_free = b.begin(t);
                     // SAFETY: a render-target texture on mpv's device; the
                     // GPU waited for the copy out of it (`begin`).
@@ -730,6 +746,10 @@ fn run(
                     any = true;
                 }
                 Some(Target::Readback(t)) => {
+                    // Both copies still unread: the GPU is behind, skip.
+                    if t.inflight.len() >= 2 {
+                        continue;
+                    }
                     // SAFETY: a render-target texture on mpv's device.
                     if let Err(e) = unsafe { s.render.render_d3d11(t.tex.as_raw(), false) } {
                         log::warn!("stream {id} on another GPU: {e}");

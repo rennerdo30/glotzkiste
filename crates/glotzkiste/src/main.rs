@@ -11,6 +11,7 @@ mod layout;
 mod libmpv;
 mod logger;
 mod placement;
+mod power;
 mod settings;
 mod stream;
 mod ui;
@@ -166,6 +167,7 @@ fn main() {
         }
     };
     logger::init(options.smoke.is_some());
+    power::keep_full_speed();
     std::process::exit(app::run(options));
 }
 

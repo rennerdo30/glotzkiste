@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Full speed in the background:** Glotzkiste opts out of Windows' power throttling (EcoQoS) and keeps its 1 ms timers while the window is hidden or minimized; the render threads run as multimedia playback threads (MMCSS).
+- **Overloaded decoders no longer starve every tile:** each stream keeps at most one unfinished frame on the GPU (a frame is skipped while the previous one is still being drawn), so the render workers stay responsive and the window always has finished frames to show (GK-20, second part).
+- A stream the decoder valve or the balancing moved is not moved again for a minute (a failing move used to repeat every two seconds).
 - **Smooth under load:** the window no longer waits on the GPU for streams whose newest frame is not finished yet (a full video decoder used to hold back every present: a 110-stream test showed 12 presents/s); such a stream shows its previous frame for a moment instead (GK-20).
 - **Closing is instant**, also with a hundred streams: the layout and settings are saved, the window disappears and the process ends without tearing every player down one by one (GK-21).
 - Stats: the top row shows the frames decoded per second over all streams, and how many reach the tiles.

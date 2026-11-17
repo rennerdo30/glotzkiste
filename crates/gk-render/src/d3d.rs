@@ -169,6 +169,7 @@ impl Presenter {
             std::thread::Builder::new()
                 .name("gk-render".into())
                 .spawn(move || {
+                    crate::playback_thread();
                     let hwnd = HWND(hwnd as *mut _);
                     match Renderer::new(hwnd, size, shared.clone()) {
                         Ok((renderer, info, fence)) => {
