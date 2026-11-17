@@ -355,6 +355,39 @@ fn layout_menu(app: &mut App, ui: &mut egui::Ui) {
             });
         }
         ui.separator();
+        ui.horizontal(|ui| {
+            if let Some(c) = &chat_channel
+                && ui.button(format!("💬 + Chat of {c}")).on_hover_text("Another chat panel on the right").clicked()
+            {
+                tab.add_chat_panel(crate::layout::Pane::chat(c));
+                app.maximized = None;
+                ui.close();
+            }
+            if ui.button("💬 + Combined chat").on_hover_text("One panel with every stream's chat in this tab").clicked()
+            {
+                tab.add_chat_panel(crate::layout::Pane::Chat {
+                    channel: chat_channel.clone().unwrap_or_default(),
+                    mode: crate::layout::ChatMode::AllStreams,
+                });
+                app.maximized = None;
+                ui.close();
+            }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("⬇ Export…").on_hover_text("Save this tab's layout as a file").clicked() {
+                app.export_layout();
+                ui.close();
+            }
+            if ui.button("⬆ Import…").on_hover_text("Open a layout file as a new tab").clicked() {
+                app.import_layout();
+                ui.close();
+            }
+        });
+        if let Some((ok, m)) = &app.layout_message {
+            ui.label(RichText::new(m).color(if *ok { GOOD } else { BAD }).size(12.0));
+        }
+        ui.separator();
         ui.label(
             RichText::new("Drag a tile by its top bar to move it; drag the gaps to resize.").color(MUTED).size(12.0),
         );

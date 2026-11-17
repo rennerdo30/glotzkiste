@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Several chat panels:** Layout → "+ Chat of …" or "+ Combined chat" stacks more chat panels in the column on the right; layout presets keep every chat panel (GK-17).
+- **Layout import and export** (Layout menu): save a tab as a `.json` file and open it again as a new tab, also on another PC (GK-18).
+- In a combined chat, the channel you write in follows the stream you listen to; a pick by hand holds until the next switch (GK-19).
 - **Settings** (⚙ in the top bar): latency, highest automatic quality, decoding on other GPUs, GPU-to-GPU copy, render threads, daily update check and update channel; saved in `settings.json` beside the layout (GK-15).
 - **Random streams** (🎲 next to the channel box): fill the current tab with any number of random live streams, optionally from one category and in one language; `--random N` (with `--random-category`, `--random-language`) does the same at start, handy for load tests (GK-12).
 

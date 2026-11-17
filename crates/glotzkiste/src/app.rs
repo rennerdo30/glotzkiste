@@ -148,6 +148,9 @@ pub struct App {
     /// The viewer's settings (GK-15) and their window.
     pub(crate) settings: crate::settings::Settings,
     pub(crate) settings_open: bool,
+    /// Layout files read (GK-18), and the last import/export message.
+    import_slot: Slot<Result<Vec<Tab>, String>>,
+    pub(crate) layout_message: Option<(bool, String)>,
     /// The "random streams" dialog (GK-12).
     pub(crate) random: RandomDialog,
     random_slot: Slot<Result<Vec<String>, String>>,
@@ -374,6 +377,8 @@ impl App {
             followed_at: None,
             settings,
             settings_open: false,
+            import_slot: Arc::default(),
+            layout_message: None,
             random: RandomDialog::default(),
             random_slot: Arc::default(),
             categories_slot: Arc::default(),
@@ -1017,6 +1022,54 @@ impl App {
         });
     }
 
+    /// Saves the current tab as a layout file the viewer picks (GK-18).
+    pub(crate) fn export_layout(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(json) = crate::layout::export(tab) else { return };
+        let name: String =
+            tab.title.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == ' ' { c } else { '_' }).collect();
+        let (slot, wake) = (self.import_slot.clone(), self.wake());
+        self.pool.spawn(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Export this tab's layout")
+                .set_file_name(format!("{}.glotzkiste.json", name.trim()))
+                .add_filter("Glotzkiste layout", &["json"])
+                .save_file()
+            else {
+                return;
+            };
+            let r = std::fs::write(&path, json).map_err(|e| format!("Could not save: {e}"));
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(r.map(|_| Vec::new()));
+            }
+            wake();
+        });
+    }
+
+    /// Opens a layout file the viewer picks as new tabs (GK-18).
+    pub(crate) fn import_layout(&mut self) {
+        let (slot, wake) = (self.import_slot.clone(), self.wake());
+        self.pool.spawn(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Import a layout")
+                .add_filter("Glotzkiste layout", &["json"])
+                .pick_file()
+            else {
+                return;
+            };
+            let r = match std::fs::metadata(&path) {
+                Ok(m) if m.len() > 4 * 1024 * 1024 => Err("That file is too big for a layout.".to_owned()),
+                _ => std::fs::read_to_string(&path)
+                    .map_err(|e| format!("Could not read it: {e}"))
+                    .and_then(|t| crate::layout::import(&t)),
+            };
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(r);
+            }
+            wake();
+        });
+    }
+
     /// After a change in the settings window: applies and saves them.
     pub(crate) fn settings_changed(&mut self) {
         self.settings.apply();
@@ -1172,6 +1225,19 @@ impl App {
                 Ok(list) => self.followed = list,
                 Err(e) => log::warn!("followed channels: {e}"),
             }
+        }
+        if let Some(r) = self.import_slot.lock().ok().and_then(|mut s| s.take()) {
+            self.layout_message = Some(match r {
+                Ok(tabs) if tabs.is_empty() => (true, "Layout exported.".into()),
+                Ok(tabs) => {
+                    let n = tabs.len();
+                    self.tabs.extend(tabs);
+                    self.active = self.tabs.len() - 1;
+                    self.maximized = None;
+                    (true, format!("Imported {n} tab{}.", if n == 1 { "" } else { "s" }))
+                }
+                Err(e) => (false, e),
+            });
         }
         if let Some(list) = self.categories_slot.lock().ok().and_then(|mut s| s.take()) {
             self.random.categories = list;

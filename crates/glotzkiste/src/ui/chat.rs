@@ -47,6 +47,8 @@ pub struct ChatView {
     pub input: String,
     /// Where messages go in a combined chat.
     pub target: Option<String>,
+    /// The stream with audio when `target` last followed it (GK-19).
+    pub heard: Option<String>,
 }
 
 /// What a pane shows: one channel, or several merged in arrival order.

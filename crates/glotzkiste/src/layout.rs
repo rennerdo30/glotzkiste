@@ -162,10 +162,70 @@ impl Tab {
             .collect()
     }
 
-    /// Rebuilds the layout; streams keep their players (same panes),
-    /// `chat` adds a chat column for that channel.
+    fn chat_panes(&self) -> Vec<Pane> {
+        self.panes_in_order()
+            .into_iter()
+            .filter_map(|id| match self.tree.tiles.get(id) {
+                Some(Tile::Pane(p @ Pane::Chat { .. })) => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Adds a chat panel to the chat column on the right (GK-17): stacked
+    /// under the chats already there, or as a new column.
+    pub fn add_chat_panel(&mut self, pane: Pane) {
+        let tiles = &mut self.tree.tiles;
+        // The column: the parent of the last chat pane, when that is a
+        // vertical stack of chats, or the chat pane itself.
+        let last_chat = self.tree.root.and_then(|_| {
+            tiles.iter().filter(|(_, t)| matches!(t, Tile::Pane(Pane::Chat { .. }))).map(|(id, _)| *id).last()
+        });
+        let new = tiles.insert_pane(pane);
+        if let Some(chat) = last_chat {
+            let parent = tiles.parent_of(chat);
+            let stack = parent.filter(|p| {
+                matches!(tiles.get(*p), Some(Tile::Container(Container::Linear(l))) if l.dir == LinearDir::Vertical
+                    && l.children.iter().all(|c| matches!(tiles.get(*c), Some(Tile::Pane(Pane::Chat { .. })))))
+            });
+            if let Some(s) = stack
+                && let Some(Tile::Container(c)) = tiles.get_mut(s)
+            {
+                c.add_child(new);
+                return;
+            }
+            let lin = Linear::new_binary(LinearDir::Vertical, [chat, new], 0.5);
+            let group = tiles.insert_container(Container::Linear(lin));
+            match parent {
+                Some(p) => {
+                    if let Some(Tile::Container(c)) = tiles.get_mut(p) {
+                        let _ = c.replace_child(chat, group);
+                    }
+                }
+                None => self.tree.root = Some(group),
+            }
+            return;
+        }
+        match self.tree.root {
+            Some(root) => {
+                let lin = Linear::new_binary(LinearDir::Horizontal, [root, new], 0.78);
+                self.tree.root = Some(tiles.insert_container(Container::Linear(lin)));
+            }
+            None => self.tree.root = Some(new),
+        }
+    }
+
+    /// Rebuilds the layout; streams keep their players (same panes) and
+    /// the chat panels stay, stacked in a column on the right; `chat` adds
+    /// one for that channel (unless it is already shown on its own).
     pub fn apply(&mut self, preset: Preset, chat: Option<String>) {
         let streams = self.stream_panes();
+        let mut chats = self.chat_panes();
+        if let Some(c) = chat
+            && !chats.iter().any(|p| matches!(p, Pane::Chat { channel, mode: ChatMode::One } if *channel == c))
+        {
+            chats.push(Pane::chat(&c));
+        }
         let mut tiles: Tiles<Pane> = Tiles::default();
         let ids: Vec<TileId> = streams.into_iter().map(|p| tiles.insert_pane(p)).collect();
         let body = if ids.is_empty() {
@@ -184,13 +244,14 @@ impl Tab {
                 }
             }
         };
-        let root = match chat {
-            Some(c) => {
-                let chat = tiles.insert_pane(Pane::chat(&c));
-                let lin = Linear::new_binary(LinearDir::Horizontal, [body, chat], 0.78);
+        let chat_ids: Vec<TileId> = chats.into_iter().map(|p| tiles.insert_pane(p)).collect();
+        let root = match chat_ids.len() {
+            0 => body,
+            n => {
+                let column = if n == 1 { chat_ids[0] } else { tiles.insert_vertical_tile(chat_ids) };
+                let lin = Linear::new_binary(LinearDir::Horizontal, [body, column], 0.78);
                 tiles.insert_container(Container::Linear(lin))
             }
-            None => body,
         };
         self.tree = Tree::new(new_id(), root, tiles);
     }
@@ -341,6 +402,37 @@ pub fn to_json(tabs: &[Tab], active: usize, latency: Latency, window: Option<Win
     serde_json::to_string(&Ref { tabs, active, latency, window }).ok()
 }
 
+/// A layout file (GK-18): one tab, or every tab of a `layout.json`.
+#[derive(serde::Serialize)]
+struct ExportRef<'a> {
+    glotzkiste_layout: u32,
+    tabs: &'a [Tab],
+}
+
+/// The tab as a layout file's text.
+pub fn export(tab: &Tab) -> Option<String> {
+    serde_json::to_string_pretty(&ExportRef { glotzkiste_layout: 1, tabs: std::slice::from_ref(tab) }).ok()
+}
+
+/// The tabs in a layout file: our export, a `layout.json`, or a single tab.
+pub fn import(text: &str) -> Result<Vec<Tab>, String> {
+    #[derive(serde::Deserialize)]
+    struct Tabs {
+        tabs: Vec<Tab>,
+    }
+    let mut tabs = match serde_json::from_str::<Tabs>(text) {
+        Ok(t) => t.tabs,
+        Err(e) => {
+            serde_json::from_str::<Tab>(text).map(|t| vec![t]).map_err(|_| format!("Not a layout file ({e})."))?
+        }
+    };
+    tabs.retain(|t| t.tree.root().is_some());
+    if tabs.is_empty() {
+        return Err("The file has no layout in it.".into());
+    }
+    Ok(tabs)
+}
+
 pub fn write(json: String) {
     let Some(p) = path() else { return };
     let tmp = p.with_extension("tmp");
@@ -358,6 +450,44 @@ mod tests {
     }
 
     #[test]
+    fn several_chat_panels_survive_presets() {
+        let mut tab = Tab::new("t", vec![Pane::stream("a"), Pane::stream("b")]);
+        tab.apply(Preset::Grid, Some("a".into()));
+        tab.add_chat_panel(Pane::chat("b"));
+        tab.add_chat_panel(Pane::Chat { channel: "a".into(), mode: ChatMode::AllStreams });
+        assert_eq!(tab.chat_panes().len(), 3);
+        tab.apply(Preset::Spotlight, None);
+        assert_eq!(tab.chat_panes().len(), 3);
+        assert_eq!(streams(&tab), vec!["a".to_string(), "b".to_string()]);
+        // Asking for a chat that is already shown adds none.
+        tab.apply(Preset::Grid, Some("b".into()));
+        assert_eq!(tab.chat_panes().len(), 3);
+        // A tab without chats gets a column.
+        let mut solo = Tab::new("s", vec![Pane::stream("x")]);
+        solo.add_chat_panel(Pane::chat("x"));
+        assert_eq!(solo.chat_panes().len(), 1);
+    }
+
+    #[test]
+    fn layout_files_round_trip() {
+        let mut tab = Tab::new("Esports", vec![Pane::stream("a"), Pane::stream("b"), Pane::stream("c")]);
+        tab.apply(Preset::Spotlight, Some("a".into()));
+        let text = export(&tab).unwrap();
+        let back = import(&text).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].title, "Esports");
+        assert_eq!(streams(&back[0]), streams(&tab));
+        // A bare tab and a whole layout.json import too.
+        let bare = serde_json::to_string(&tab).unwrap();
+        assert_eq!(import(&bare).unwrap().len(), 1);
+        let twin = import(&bare).unwrap().remove(0);
+        let whole = to_json(&[tab, twin], 0, Latency::Low, None).unwrap();
+        assert_eq!(import(&whole).unwrap().len(), 2);
+        assert!(import("{\"hello\": 1}").is_err());
+        assert!(import("not json").is_err());
+    }
+
+    #[test]
     fn presets_keep_every_stream() {
         let mut t = Tab::new("x", vec![Pane::stream("a"), Pane::stream("b"), Pane::stream("c")]);
         for p in Preset::ALL {
@@ -365,8 +495,10 @@ mod tests {
             assert_eq!(streams(&t), ["a", "b", "c"], "{p:?}");
             assert!(t.has_chat());
         }
+        // A preset keeps the chat panels (GK-17); closing one removes it.
         t.apply(Preset::Grid, None);
-        assert!(!t.has_chat());
+        assert!(t.has_chat());
+        assert_eq!(t.chat_panes().len(), 1);
     }
 
     #[test]

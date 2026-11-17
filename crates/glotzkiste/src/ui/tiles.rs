@@ -431,6 +431,17 @@ impl Behavior<'_> {
         let mut paint =
             super::chat::Paint { images: self.images, global_badges: &global, generation: self.chat.generation };
         let view = self.chat_views.entry(tile).or_default();
+        // Writing follows listening: a new audio focus becomes the send
+        // target when this chat shows that channel (a choice by hand holds
+        // until the next switch).
+        if self.audio != view.heard {
+            view.heard = self.audio.clone();
+            if let Some(a) = &self.audio
+                && src.channels.iter().any(|(c, _, _)| c == a)
+            {
+                view.target = Some(a.clone());
+            }
+        }
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
         match view.show(&mut child, body, &src, can_send, &mut paint) {
             super::chat::Action::Send(c, t) => self.acts.push(Act::Send(c, t)),
