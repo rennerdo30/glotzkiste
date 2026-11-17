@@ -9,7 +9,7 @@ const LICENSE: &str = include_str!("../../../../LICENSE");
 const LIBMPV_NOTICE: &str = include_str!("../../../../licenses/libmpv-NOTICE.txt");
 static LOGO: &[u8] = include_bytes!("../../../../assets/logo/glotzkiste-256.png");
 
-fn logo(app: &mut App, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+pub(super) fn logo(app: &mut App, ctx: &egui::Context) -> Option<egui::TextureHandle> {
     if app.logo.is_none() {
         let img = gk_twitch::image::decode(LOGO).ok()?;
         let f = img.frames.into_iter().next()?;

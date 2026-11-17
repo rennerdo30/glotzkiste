@@ -2,7 +2,28 @@
 //! chat panes and empty panes, arranged by egui_tiles.
 
 use super::chat::channel_color;
-use super::{ACCENT, BAD, GOOD, MUTED, PANEL, RAISED, TEXT, WARN, pill};
+use super::{ACCENT, BAD, GOOD, LINE, MUTED, PANEL, RAISED, TEXT, WARN, pill};
+
+/// Rounded corners of every tile.
+const TILE_RADIUS: u8 = 8;
+/// Space between tiles (also egui_tiles' gap).
+const GAP: f32 = 6.0;
+
+/// A dark shade fading out downward from the top of `rect` over `height`
+/// points (behind the hover bar: readable without a hard strip).
+fn top_shade(painter: &egui::Painter, rect: Rect, height: f32, alpha: u8) {
+    let r = Rect::from_min_max(rect.min, pos2(rect.max.x, (rect.min.y + height).min(rect.max.y)));
+    let mut mesh = egui::Mesh::default();
+    let top = Color32::from_black_alpha(alpha);
+    let bottom = Color32::from_black_alpha(0);
+    mesh.colored_vertex(r.left_top(), top);
+    mesh.colored_vertex(r.right_top(), top);
+    mesh.colored_vertex(r.left_bottom(), bottom);
+    mesh.colored_vertex(r.right_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 3, 2);
+    painter.add(egui::Shape::mesh(mesh));
+}
 use crate::app::App;
 use crate::chat_state::{BadgeMap, ChatState};
 use crate::images::Images;
@@ -17,6 +38,8 @@ use std::collections::HashMap;
 enum Act {
     Remove(TileId),
     AddChat(TileId, String),
+    /// Open the random-streams dialog.
+    Random,
     /// A grid tile's new span in cells (GK-16).
     Span(TileId, u32, u32),
     Audio(String),
@@ -106,13 +129,12 @@ impl Behavior<'_> {
         let handle = self.streams.get(&p.id);
         let st = handle.map(|s| s.status()).unwrap_or_default();
         let painter = ui.painter().clone();
-        painter.rect_filled(aligned, 0.0, Color32::BLACK);
+        painter.rect_filled(aligned, CornerRadius::same(TILE_RADIUS), Color32::BLACK);
         if p.id != 0 && px[2] > px[0] && px[3] > px[1] {
-            painter.image(
-                egui::TextureId::User(p.id),
-                aligned,
-                Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
-                Color32::WHITE,
+            // The video itself has rounded corners (a textured rounded rect).
+            painter.add(
+                egui::epaint::RectShape::filled(aligned, CornerRadius::same(TILE_RADIUS), Color32::WHITE)
+                    .with_texture(egui::TextureId::User(p.id), Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0))),
             );
             // While tiles glide, the stream keeps rendering at its settled
             // size (scaled): no texture remade and no quality switch per
@@ -189,7 +211,12 @@ impl Behavior<'_> {
 
         // The tile with the sound has an accent frame: visible at a glance.
         if audible {
-            painter.rect_stroke(aligned.shrink(1.0), 0.0, egui::Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
+            painter.rect_stroke(
+                aligned,
+                CornerRadius::same(TILE_RADIUS),
+                egui::Stroke::new(2.0, ACCENT),
+                egui::StrokeKind::Inside,
+            );
         }
         let hovered = ui.rect_contains_pointer(rect);
         // Grid tiles: a corner grip resizes this one tile in grid cells
@@ -202,8 +229,8 @@ impl Behavior<'_> {
                 let cell = self
                     .packed_cell
                     .unwrap_or(vec2(
-                        (rect.width() - (span.0 - 1) as f32 * 3.0) / span.0 as f32,
-                        (rect.height() - (span.1 - 1) as f32 * 3.0) / span.1 as f32,
+                        (rect.width() - (span.0 - 1) as f32 * GAP) / span.0 as f32,
+                        (rect.height() - (span.1 - 1) as f32 * GAP) / span.1 as f32,
                     ))
                     .max(vec2(40.0, 40.0));
                 ui.ctx().data_mut(|d| d.insert_temp(key, (span, cell, rect.min)));
@@ -217,12 +244,12 @@ impl Behavior<'_> {
                     (ui.ctx().pointer_interact_pos(), ui.input(|i| i.pointer.press_origin()))
             {
                 let d = now - from;
-                let step = cell + vec2(3.0, 3.0);
+                let step = cell + vec2(GAP, GAP);
                 let max = crate::layout::MAX_SPAN as f32;
                 let w = ((w0 as f32 * step.x + d.x) / step.x).round().clamp(1.0, max) as u32;
                 let h = ((h0 as f32 * step.y + d.y) / step.y).round().clamp(1.0, max) as u32;
                 ui.ctx().data_mut(|dm| dm.insert_temp(egui::Id::NULL.with(("grip-to", tile)), (w, h)));
-                let ghost = Rect::from_min_size(origin, vec2(w as f32 * step.x - 3.0, h as f32 * step.y - 3.0));
+                let ghost = Rect::from_min_size(origin, vec2(w as f32 * step.x - GAP, h as f32 * step.y - GAP));
                 let fg = ui
                     .ctx()
                     .layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::NULL.with("grip-ghost")));
@@ -280,8 +307,8 @@ impl Behavior<'_> {
         }
         // Hover bar: drag handle, name, title, latency, quality, volume,
         // chat, maximize, close.
-        let bar = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + 34.0));
-        painter.rect_filled(bar, 0.0, Color32::from_black_alpha(185));
+        let bar = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + 36.0));
+        top_shade(&painter, rect, 64.0, 215);
         // The bar senses drags under its buttons too (they only sense
         // clicks): grab cursor, drag and double-click only on free bar space.
         let drag = ui.interact(bar, ui.scope_id().with(("drag", tile)), Sense::click_and_drag());
@@ -397,9 +424,9 @@ impl Behavior<'_> {
     fn chat_ui(&mut self, ui: &mut egui::Ui, tile: TileId, channel: &mut String, mode: &mut ChatMode) -> UiResponse {
         let rect = ui.max_rect();
         let painter = ui.painter().clone();
-        painter.rect_filled(rect, 0.0, PANEL);
-        let header = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + 30.0));
-        painter.rect_filled(header, 0.0, Color32::from_rgb(31, 31, 35));
+        painter.rect_filled(rect, CornerRadius::same(TILE_RADIUS), PANEL);
+        let header = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + 34.0));
+        painter.hline(header.x_range().shrink(8.0), header.max.y, egui::Stroke::new(1.0, LINE));
         let mut response = UiResponse::None;
         let drag = ui.interact(header, ui.scope_id().with(("chatdrag", tile)), Sense::click_and_drag());
         if drag.drag_started() {
@@ -538,6 +565,8 @@ impl Behavior<'_> {
             }
         }
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
+        // Lines scrolled up end at the header line, not under it.
+        child.set_clip_rect(body.intersect(ui.clip_rect()));
         match view.show(&mut child, body, &src, can_send, &mut paint) {
             super::chat::Action::Send(c, t) => self.acts.push(Act::Send(c, t)),
             super::chat::Action::Login => self.acts.push(Act::Login),
@@ -548,26 +577,52 @@ impl Behavior<'_> {
 
     fn empty_ui(&mut self, ui: &mut egui::Ui, tile: TileId) -> UiResponse {
         let rect = ui.max_rect();
-        ui.painter().rect_stroke(
-            rect.shrink(6.0),
-            CornerRadius::same(10),
-            egui::Stroke::new(1.0, RAISED),
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(TILE_RADIUS), Color32::from_rgb(16, 16, 20));
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            CornerRadius::same(TILE_RADIUS),
+            egui::Stroke::new(1.0, LINE),
             egui::StrokeKind::Inside,
         );
-        let inner = Rect::from_center_size(rect.center(), vec2(300.0_f32.min(rect.width() - 20.0), 90.0));
-        let mut child =
-            ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)));
-        child.label(RichText::new("Watch a channel").font(crate::fonts::bold(18.0)).color(TEXT));
-        let r = child.add(
-            egui::TextEdit::singleline(self.add_text)
-                .hint_text("channel name or twitch.tv link")
-                .desired_width(inner.width())
-                .id_salt(("empty-add", tile)),
+        // A centred card: what to do, and the two ways to do it.
+        let w = 360.0_f32.min(rect.width() - 24.0);
+        let card = Rect::from_center_size(rect.center(), vec2(w, 232.0));
+        painter.rect_filled(card, CornerRadius::same(14), PANEL);
+        painter.rect_stroke(card, CornerRadius::same(14), egui::Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
+        let mut child = ui.new_child(
+            egui::UiBuilder::new().max_rect(card.shrink(20.0)).layout(egui::Layout::top_down(egui::Align::Center)),
         );
-        if r.lost_focus() && child.input(|i| i.key_pressed(egui::Key::Enter)) {
+        child.label(RichText::new("📺").size(30.0));
+        child.label(RichText::new("Watch a channel").font(crate::fonts::bold(18.0)).color(TEXT));
+        child.add_space(4.0);
+        let field = egui::Frame::NONE
+            .fill(super::FIELD)
+            .corner_radius(CornerRadius::same(8))
+            .stroke(egui::Stroke::new(1.0, LINE))
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(&mut child, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(self.add_text)
+                        .hint_text("channel name or twitch.tv link")
+                        .desired_width(f32::INFINITY)
+                        .frame(egui::Frame::NONE)
+                        .id_salt(("empty-add", tile)),
+                )
+            })
+            .inner;
+        if field.lost_focus() && child.input(|i| i.key_pressed(egui::Key::Enter)) {
             self.acts.push(Act::Add(std::mem::take(self.add_text)));
         }
-        child.label(RichText::new("Enter adds it here. Ctrl+T opens a new tab.").color(MUTED).size(12.0));
+        child.add_space(2.0);
+        if child
+            .add(egui::Button::new(RichText::new("🎲  Random live streams").color(TEXT)).fill(RAISED))
+            .on_hover_text("Fill this tab with random live channels")
+            .clicked()
+        {
+            self.acts.push(Act::Random);
+        }
+        child.label(RichText::new("Enter adds it here · Ctrl+T opens a new tab").color(MUTED).size(12.0));
         UiResponse::None
     }
 }
@@ -607,7 +662,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
     }
 
     fn gap_width(&self, _style: &egui::Style) -> f32 {
-        3.0
+        GAP
     }
 
     fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
@@ -630,7 +685,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
 /// Draws a grid of streams packed (tiles spanning several cells) and the
 /// chat column beside it, without egui_tiles (it has no spanning grid).
 fn draw_packed(b: &mut Behavior, tab: &mut crate::layout::Tab, ui: &mut egui::Ui, p: &crate::layout::Packable) {
-    let gap = 3.0;
+    let gap = GAP;
     let full = ui.max_rect();
     let (body, chats) = match &p.chat {
         Some((share, chats)) => {
@@ -823,6 +878,7 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
             Act::Send(c, t) => app.chat.send(&c, &t),
             Act::Login => app.login.open = true,
             Act::Add(c) => app.add_channel(&c),
+            Act::Random => app.random.open = true,
         }
     }
 }

@@ -12,9 +12,15 @@ use crate::stream::Latency;
 use egui::{Color32, CornerRadius, FontId, RichText, Stroke, vec2};
 use gk_render::VideoTile;
 
-pub const BG: Color32 = Color32::from_rgb(14, 14, 16);
-pub const PANEL: Color32 = Color32::from_rgb(24, 24, 27);
-pub const RAISED: Color32 = Color32::from_rgb(38, 38, 44);
+pub const BG: Color32 = Color32::from_rgb(11, 11, 14);
+pub const PANEL: Color32 = Color32::from_rgb(22, 22, 27);
+pub const RAISED: Color32 = Color32::from_rgb(36, 36, 44);
+/// Hovered controls.
+pub const HOVER: Color32 = Color32::from_rgb(48, 48, 58);
+/// Hairlines between areas.
+pub const LINE: Color32 = Color32::from_rgb(40, 40, 48);
+/// Inputs (a touch darker than the panel).
+pub const FIELD: Color32 = Color32::from_rgb(14, 14, 18);
 pub const ACCENT: Color32 = Color32::from_rgb(145, 70, 255);
 pub const TEXT: Color32 = Color32::from_rgb(239, 239, 241);
 pub const MUTED: Color32 = Color32::from_rgb(173, 173, 184);
@@ -34,47 +40,76 @@ pub fn style(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
     v.panel_fill = PANEL;
     v.window_fill = PANEL;
-    v.extreme_bg_color = Color32::from_rgb(10, 10, 12);
+    v.extreme_bg_color = FIELD;
     v.faint_bg_color = RAISED;
-    v.selection.bg_fill = ACCENT;
+    v.code_bg_color = RAISED;
+    v.selection.bg_fill = ACCENT.gamma_multiply(0.85);
     v.selection.stroke = Stroke::new(1.0, TEXT);
-    v.hyperlink_color = Color32::from_rgb(160, 120, 255);
-    v.window_corner_radius = CornerRadius::same(8);
+    v.hyperlink_color = Color32::from_rgb(170, 130, 255);
+    v.window_corner_radius = CornerRadius::same(12);
+    v.menu_corner_radius = CornerRadius::same(10);
+    v.window_stroke = Stroke::new(1.0, LINE);
+    v.window_shadow = egui::Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(140) };
+    v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(120) };
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
     v.widgets.inactive.weak_bg_fill = RAISED;
     v.widgets.inactive.bg_fill = RAISED;
+    v.widgets.inactive.bg_stroke = Stroke::NONE;
     v.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
-    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(54, 54, 62);
-    v.widgets.hovered.bg_fill = Color32::from_rgb(54, 54, 62);
+    v.widgets.hovered.weak_bg_fill = HOVER;
+    v.widgets.hovered.bg_fill = HOVER;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(70, 70, 84));
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT);
     v.widgets.active.weak_bg_fill = ACCENT;
     v.widgets.active.bg_fill = ACCENT;
-    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-        w.corner_radius = CornerRadius::same(6);
+    v.widgets.active.bg_stroke = Stroke::NONE;
+    v.widgets.open.weak_bg_fill = HOVER;
+    v.widgets.open.bg_fill = HOVER;
+    for w in [
+        &mut v.widgets.noninteractive,
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        w.corner_radius = CornerRadius::same(8);
+        w.expansion = 0.0;
     }
     ctx.set_visuals(v);
     ctx.global_style_mut(|s| {
-        s.spacing.item_spacing = vec2(6.0, 6.0);
-        s.spacing.button_padding = vec2(8.0, 4.0);
+        s.spacing.item_spacing = vec2(8.0, 6.0);
+        s.spacing.button_padding = vec2(10.0, 5.0);
+        s.spacing.interact_size.y = 26.0;
+        s.spacing.menu_margin = egui::Margin::same(8);
+        s.spacing.window_margin = egui::Margin::same(16);
+        s.spacing.scroll = egui::style::ScrollStyle::floating();
         s.interaction.tooltip_delay = 0.25;
-        s.animation_time = 0.08;
+        s.animation_time = 0.1;
     });
 }
 
 pub fn draw(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, heights: &mut Vec<(u64, u32)>) {
     shortcuts(app, ui);
     egui::Panel::top("bar")
-        .exact_size(42.0)
-        .frame(egui::Frame::NONE.fill(PANEL).inner_margin(egui::Margin::symmetric(8, 6)))
+        .exact_size(48.0)
+        .frame(egui::Frame::NONE.fill(PANEL).inner_margin(egui::Margin::symmetric(10, 8)))
         .show(ui, |ui| {
             top_bar(app, ui);
+            // A hairline under the bar separates it from the tiles.
+            let r = ui.max_rect().expand2(vec2(10.0, 8.0));
+            ui.painter().hline(r.x_range(), r.max.y - 0.5, Stroke::new(1.0, LINE));
         });
-    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG)).show(ui, |ui| {
-        if let Some(e) = app.error.clone() {
-            ui.centered_and_justified(|ui| ui.label(RichText::new(e).color(BAD).size(16.0)));
-            return;
-        }
-        tiles::content(app, ui, videos, heights);
-    });
+    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG).inner_margin(egui::Margin::same(6))).show(
+        ui,
+        |ui| {
+            if let Some(e) = app.error.clone() {
+                ui.centered_and_justified(|ui| ui.label(RichText::new(e).color(BAD).size(16.0)));
+                return;
+            }
+            tiles::content(app, ui, videos, heights);
+        },
+    );
     if app.login.open {
         login_dialog(app, ui.ctx());
     }
@@ -148,9 +183,75 @@ fn pill(ui: &mut egui::Ui, text: &str, fill: Color32, fg: Color32) {
     );
 }
 
+/// A square, frameless icon button that lights up on hover (and stays lit
+/// while `on`): one look for every icon in the bar.
+fn icon_button(ui: &mut egui::Ui, icon: &str, hint: &str, on: bool) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(vec2(30.0, 30.0), egui::Sense::click());
+    let fill = if r.is_pointer_button_down_on() {
+        RAISED
+    } else if r.hovered() || on {
+        HOVER
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+    let col = if r.hovered() || on { TEXT } else { MUTED };
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon, FontId::proportional(16.0), col);
+    if r.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    r.on_hover_text(hint)
+}
+
+/// A tab in the bar: a pill, the active one raised with an accent line.
+fn tab_button(ui: &mut egui::Ui, title: &str, count: usize, selected: bool) -> egui::Response {
+    let font = if selected { crate::fonts::bold(14.0) } else { FontId::proportional(14.0) };
+    let title_g = ui.painter().layout_no_wrap(title.to_owned(), font, if selected { TEXT } else { MUTED });
+    let badge = (count > 0).then(|| {
+        ui.painter().layout_no_wrap(count.to_string(), FontId::proportional(11.0), if selected { TEXT } else { MUTED })
+    });
+    let badge_w = badge.as_ref().map_or(0.0, |b| b.size().x + 12.0 + 6.0);
+    let size = vec2(title_g.size().x + 24.0 + badge_w, 30.0);
+    let (rect, r) = ui.allocate_exact_size(size, egui::Sense::click());
+    let p = ui.painter();
+    let fill = if selected {
+        RAISED
+    } else if r.hovered() {
+        Color32::from_rgb(30, 30, 37)
+    } else {
+        Color32::TRANSPARENT
+    };
+    p.rect_filled(rect, CornerRadius::same(8), fill);
+    let text_pos = egui::pos2(rect.min.x + 12.0, rect.center().y - title_g.size().y / 2.0);
+    let title_w = title_g.size().x;
+    p.galley(text_pos, title_g, TEXT);
+    if let Some(b) = badge {
+        let br = egui::Rect::from_min_size(
+            egui::pos2(text_pos.x + title_w + 6.0, rect.center().y - 9.0),
+            vec2(b.size().x + 12.0, 18.0),
+        );
+        p.rect_filled(br, CornerRadius::same(9), if selected { ACCENT.gamma_multiply(0.55) } else { RAISED });
+        p.galley(br.center() - b.size() / 2.0, b, TEXT);
+    }
+    if selected {
+        let line =
+            egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.max.y - 1.0), vec2(rect.width() - 20.0, 2.0));
+        p.rect_filled(line, CornerRadius::same(1), ACCENT);
+    }
+    if r.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    r
+}
+
 fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal_centered(|ui| {
-        // Tabs.
+        // The logo, then the tabs.
+        if let Some(logo) = about::logo(app, ui.ctx()) {
+            ui.add(egui::Image::new(&logo).fit_to_exact_size(vec2(24.0, 24.0)).corner_radius(6))
+                .on_hover_text("Glotzkiste");
+            ui.add_space(4.0);
+        }
         let mut close: Option<usize> = None;
         for i in 0..app.tabs.len() {
             if app.renaming == Some(i) {
@@ -164,12 +265,8 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             }
             let selected = i == app.active;
             let n = app.tabs[i].stream_channels().len();
-            let label = if n > 0 { format!("{}  {n}", app.tabs[i].title) } else { app.tabs[i].title.clone() };
-            let text = RichText::new(label).color(if selected { TEXT } else { MUTED });
-            let b = egui::Button::new(text)
-                .fill(if selected { RAISED } else { Color32::TRANSPARENT })
-                .stroke(if selected { Stroke::new(1.0, ACCENT) } else { Stroke::NONE });
-            let r = ui.add(b).on_hover_text("Double-click to rename, middle-click to close");
+            let title = app.tabs[i].title.clone();
+            let r = tab_button(ui, &title, n, selected).on_hover_text("Double-click to rename, middle-click to close");
             if r.clicked() {
                 app.active = i;
                 app.maximized = None;
@@ -196,36 +293,26 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             app.active = app.active.min(app.tabs.len() - 1);
             app.maximized = None;
         }
-        if ui
-            .add(egui::Button::new(RichText::new("+").size(16.0)).frame(false))
-            .on_hover_text("New tab (Ctrl+T)")
-            .clicked()
-        {
+        if icon_button(ui, "+", "New tab (Ctrl+T)", false).clicked() {
             app.tabs.push(Tab::new(&format!("Tab {}", app.tabs.len() + 1), vec![]));
             app.active = app.tabs.len() - 1;
             app.maximized = None;
         }
-        ui.separator();
-        add_channel_box(app, ui, 220.0, "bar");
-        if ui
-            .add(egui::Button::new(RichText::new("🎲").size(15.0)).frame(false))
-            .on_hover_text("Add random live streams")
-            .clicked()
-        {
+        ui.add_space(6.0);
+        let (sep, _) = ui.allocate_exact_size(vec2(1.0, 22.0), egui::Sense::hover());
+        ui.painter().rect_filled(sep, CornerRadius::ZERO, LINE);
+        ui.add_space(6.0);
+        add_channel_box(app, ui, 240.0, "bar");
+        if icon_button(ui, "🎲", "Add random live streams", app.random.open).clicked() {
             app.random.open = !app.random.open;
         }
 
         // Right side, laid out right to left.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add(egui::Button::new(RichText::new("⋯").size(16.0)).frame(false))
-                .on_hover_text("About, updates, licences")
-                .clicked()
-            {
+            if icon_button(ui, "⋯", "About, updates, licences", app.about_open).clicked() {
                 app.about_open = !app.about_open;
             }
-            if ui.add(egui::Button::new(RichText::new("⚙").size(16.0)).frame(false)).on_hover_text("Settings").clicked()
-            {
+            if icon_button(ui, "⚙", "Settings", app.settings_open).clicked() {
                 app.settings_open = !app.settings_open;
             }
             account_button(app, ui);
@@ -281,11 +368,29 @@ fn top_bar(app: &mut App, ui: &mut egui::Ui) {
 }
 
 pub fn add_channel_box(app: &mut App, ui: &mut egui::Ui, width: f32, id: &str) {
-    let te = egui::TextEdit::singleline(&mut app.add_text)
-        .hint_text("Add channel…")
-        .desired_width(width)
-        .id_salt(("add", id));
-    let r = ui.add(te);
+    // A search field: rounded, a magnifier in front, a focus ring.
+    let field_id = ui.make_persistent_id(("add-field", id));
+    let focused = ui.ctx().memory(|m| m.has_focus(field_id));
+    let r = egui::Frame::NONE
+        .fill(FIELD)
+        .corner_radius(CornerRadius::same(8))
+        .stroke(Stroke::new(1.0, if focused { ACCENT.gamma_multiply(0.8) } else { LINE }))
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(RichText::new("🔍").color(MUTED).size(13.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.add_text)
+                        .hint_text("Add a channel…")
+                        .desired_width(width - 30.0)
+                        .frame(egui::Frame::NONE)
+                        .id(field_id),
+                )
+            })
+            .inner
+        })
+        .inner;
     if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         let text = std::mem::take(&mut app.add_text);
         app.add_channel(&text);

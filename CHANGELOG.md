@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **A cleaner look:** the logo in the top bar, pill tabs with an accent underline and stream count badges, one style for every icon button, a search field for adding channels, rounded tiles (the video too) with more air between them, a soft shade behind a tile's hover bar instead of a hard strip, a card for empty tabs (with "Random live streams"), roomier menus and dialogs with shadows.
 - **Full decoder relief:** a video decoder at 92 % or more counts as overloaded even without rising drops (late frames are skipped, not dropped); the valve then moves up to three streams per step: to a GPU with room, else the smallest ones (480p or less, cheap in software) to the CPU. Stats name the saturated decoder (90 % or more) instead of "Display" for streams on the main GPU, and the decoded total counts at least the frames each stream shows.
 - Two unfinished frames per stream on the GPU (four shared textures per stream): with a full decoder one frame in flight capped every stream at about 12 fps. Balancing moves up to four streams every two seconds while a video decoder is at 90 % or more.
 - **Starting a hundred streams:** a stream waits for its render worker (up to 30 s) instead of falling back to the render thread after 3 s. The fallback put half of all streams on the render thread (91 % of a core, 24 presents/s) and gave some players two render contexts (mpv error -20). Compiled shaders are cached on disk.

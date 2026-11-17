@@ -527,7 +527,10 @@ impl ChatView {
                 }
                 r.request_focus();
             }
-        } else if ui.put(input, egui::Button::new("Log in to chat").frame(false)).clicked() {
+        } else if ui
+            .put(input, egui::Button::new(RichText::new("Log in to chat").color(super::TEXT)).fill(super::RAISED))
+            .clicked()
+        {
             action = Action::Login;
         }
         action
