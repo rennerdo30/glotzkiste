@@ -111,7 +111,12 @@ pub struct Presenter {
 
 /// How long a stream thread waits for a render thread to take or release a
 /// stream (normally a few milliseconds).
-const PLACE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Generous: at a start with a hundred streams a worker creates dozens of
+/// render contexts one after another (each compiles shaders unless they are
+/// cached). Giving up early sent streams to the render thread while the
+/// worker still made their context later: two contexts for one player
+/// (mpv error -20) and a render thread drawing half of all streams.
+const PLACE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often unfinished worker frames are looked at again.
 const READY_POLL: Duration = Duration::from_millis(2);
@@ -306,7 +311,14 @@ impl Presenter {
         };
         let (tx, rx) = mpsc::channel();
         w.add(id, mpv.clone(), tx);
-        rx.recv_timeout(PLACE_TIMEOUT).unwrap_or_else(|_| Err("the render worker did not answer".into()))?;
+        if let Err(e) =
+            rx.recv_timeout(PLACE_TIMEOUT).unwrap_or_else(|_| Err("the render worker did not answer".into()))
+        {
+            // Never two render contexts for one player: the worker drops
+            // the request if it gets to it after all.
+            w.remove(id, None);
+            return Err(e);
+        }
         if let Ok(mut p) = self.placed.lock() {
             p.insert(id, place);
         }

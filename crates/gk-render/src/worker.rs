@@ -540,8 +540,11 @@ fn run(
             }
         }
         for (id, mpv, reply) in req.add {
+            let started = Instant::now();
             // SAFETY: our device was created without SINGLETHREADED.
-            match unsafe { RenderContext::new_d3d11(&mpv, device.as_raw()) } {
+            let made = unsafe { RenderContext::new_d3d11(&mpv, device.as_raw()) };
+            log::info!("stream {id}: render context in {} ms", started.elapsed().as_millis());
+            match made {
                 Ok(mut render) => {
                     let s = shared.clone();
                     render.set_update_callback(move || s.poke());

@@ -396,6 +396,17 @@ impl Control {
                 log::warn!("stream {}: option {k}={v}: {e}", self.id);
             }
         }
+        // Compiled shaders are cached on disk: a render context after the
+        // first one (and every later start) skips the compile, which made
+        // a start with a hundred streams take many seconds per worker.
+        if let Some(dir) = gk_twitch::local_dir().map(|d| d.join("shader-cache")) {
+            let _ = std::fs::create_dir_all(&dir);
+            for (k, v) in [("gpu-shader-cache", "yes"), ("gpu-shader-cache-dir", &*dir.to_string_lossy())] {
+                if let Err(e) = mpv.set_option(k, v) {
+                    log::warn!("stream {}: option {k}: {e}", self.id);
+                }
+            }
+        }
         mpv.initialize().map_err(|e| e.to_string())?;
         // mpv's own warnings go to our log (glotzkiste.log).
         let _ = mpv.request_log_messages("warn");
