@@ -1243,11 +1243,12 @@ impl App {
         );
         if ld(&st.copied_frames) > 0 {
             println!(
-                "copies: frames={} MB={:.1} ms_total={:.1} us_per_frame={:.0}",
+                "copies: frames={} gpu_to_gpu={} MB={:.1} cpu_ms_total={:.1} cpu_us_per_readback={:.0}",
                 ld(&st.copied_frames),
+                ld(&st.gpu_copied_frames),
                 ld(&st.copied_bytes) as f64 / 1e6,
                 ld(&st.copy_us) as f64 / 1000.0,
-                ld(&st.copy_us) as f64 / ld(&st.copied_frames) as f64
+                ld(&st.copy_us) as f64 / (ld(&st.copied_frames) - ld(&st.gpu_copied_frames)).max(1) as f64
             );
         }
         let tiles = st.tiles.lock().map(|t| t.clone()).unwrap_or_default();

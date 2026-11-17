@@ -261,7 +261,14 @@ impl Presenter {
             return Ok(w.clone());
         }
         let shared = self.shared.clone();
-        let w = Arc::new(Worker::start(luid, Delivery::Readback, Arc::new(move || shared.poke_video()))?);
+        // GPU to GPU unless turned off (GK_BRIDGE=0) or the main thread has
+        // no shared fence; the worker falls back to read-back by itself.
+        let bridge_off = std::env::var("GK_BRIDGE").is_ok_and(|v| v == "0");
+        let delivery = match self.main_fence {
+            Some(main_fence) if !bridge_off => Delivery::Bridge { main_luid: self.luid, main_fence },
+            _ => Delivery::Readback,
+        };
+        let w = Arc::new(Worker::start(luid, delivery, Arc::new(move || shared.poke_video()))?);
         if let Ok(mut v) = self.shared.workers.lock() {
             v.push(w.shared.clone());
         }
@@ -409,6 +416,7 @@ struct Linked {
     ready: Option<(usize, u64)>,
     /// The texture the next present samples.
     shown: Option<usize>,
+    size: (u32, u32),
 }
 
 /// A stream drawn by another GPU: its newest frame, uploaded.
@@ -815,11 +823,16 @@ impl Renderer {
     fn open_ring(&self, ring: &crate::worker::Ring) -> windows::core::Result<Vec<ID3D11ShaderResourceView>> {
         let mut views = Vec::with_capacity(RING);
         for h in ring.handles {
-            // SAFETY: a legacy shared handle of a texture on this GPU.
+            // SAFETY: a shared handle of a texture on this GPU (legacy, or
+            // NT from the bridge; the ring closes those).
             unsafe {
-                let mut tex: Option<ID3D11Texture2D> = None;
-                self.device.OpenSharedResource(HANDLE(h as *mut _), &mut tex)?;
-                let tex = tex.ok_or_else(windows::core::Error::empty)?;
+                let tex: ID3D11Texture2D = if ring.nt {
+                    self.device.cast::<ID3D11Device1>()?.OpenSharedResource1(HANDLE(h as *mut _))?
+                } else {
+                    let mut tex: Option<ID3D11Texture2D> = None;
+                    self.device.OpenSharedResource(HANDLE(h as *mut _), &mut tex)?;
+                    tex.ok_or_else(windows::core::Error::empty)?
+                };
                 let mut v = None;
                 self.device.CreateShaderResourceView(&tex, None, Some(&mut v))?;
                 views.push(v.ok_or_else(windows::core::Error::empty)?);
@@ -860,8 +873,14 @@ impl Renderer {
             for (id, ring) in rings {
                 match self.open_ring(&ring) {
                     Ok(views) => {
-                        let l =
-                            Linked { worker: w.index, generation: ring.generation, views, ready: None, shown: None };
+                        let l = Linked {
+                            worker: w.index,
+                            generation: ring.generation,
+                            views,
+                            ready: None,
+                            shown: None,
+                            size: ring.size,
+                        };
                         self.linked.insert(id, l);
                         if let Ok(mut t) = stats.tiles.lock() {
                             (t.entry(id).or_default().width, t.entry(id).or_default().height) = ring.size;
@@ -881,12 +900,21 @@ impl Renderer {
                 if !p.redraw {
                     stats.video_frames.fetch_add(1, Ordering::Relaxed);
                 }
+                if p.copied {
+                    stats.copied_frames.fetch_add(1, Ordering::Relaxed);
+                    stats.gpu_copied_frames.fetch_add(1, Ordering::Relaxed);
+                    stats.copied_bytes.fetch_add(u64::from(l.size.0 * l.size.1 * 4), Ordering::Relaxed);
+                }
                 if let Ok(mut t) = stats.tiles.lock() {
                     let e = t.entry(id).or_default();
                     if p.redraw {
                         e.redraws += 1;
                     } else {
                         e.frames += 1;
+                    }
+                    if p.copied {
+                        e.copied += 1;
+                        e.gpu_copied += 1;
                     }
                     e.visible = visible;
                 }
@@ -907,6 +935,8 @@ impl Renderer {
             }
         }
         for (id, f) in frames {
+            // A stream whose GPU-to-GPU copy failed sends read-back frames.
+            self.linked.remove(&id);
             let t = Instant::now();
             let size = (f.width, f.height);
             if f.rgba.len() != (f.width * f.height * 4) as usize {

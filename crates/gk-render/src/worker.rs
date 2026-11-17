@@ -9,12 +9,17 @@
 //!   sampling, and signals when a present no longer needs a texture, which
 //!   the worker's GPU waits for before drawing into it again. No thread ever
 //!   waits on the CPU.
-//! - **On another GPU** (`Delivery::Readback`): mpv cannot send copy-back
+//! - **On another GPU** (`Delivery::Bridge`): mpv cannot send copy-back
 //!   decoding to a chosen adapter, so the worker's device lives on that GPU;
 //!   the stream decodes and scales there and each finished tile-sized frame
-//!   is read back (without waiting for that GPU) and uploaded by the main
-//!   thread: one copy per frame at tile size, the price of another decoder.
+//!   is copied GPU to GPU through a cross-adapter heap (`bridge.rs`) into
+//!   shared textures on the main GPU, which the main thread samples like
+//!   the ones above.
+//! - **Fallback** (`Delivery::Readback`, when the bridge cannot be set up
+//!   or `GK_BRIDGE=0`): each frame is read back (without waiting for that
+//!   GPU) and uploaded by the main thread.
 
+use crate::bridge::{self, Bridge};
 use crate::d3d::wait_ns;
 use gk_mpv::{FrameKind, Mpv, RenderContext};
 use std::collections::{HashMap, VecDeque};
@@ -38,6 +43,9 @@ pub(crate) enum Delivery {
     /// Same GPU: shared textures, ordered by the main thread's fence (an NT
     /// handle the worker opens).
     Shared { main_fence: usize },
+    /// Another GPU: copied GPU to GPU into shared textures on the main GPU
+    /// (falls back to `Readback` when that cannot be set up).
+    Bridge { main_luid: (u32, i32), main_fence: usize },
     /// Another GPU: read back, uploaded by the main thread.
     Readback,
 }
@@ -53,12 +61,26 @@ pub(crate) struct Frame {
     pub redraw: bool,
 }
 
-/// New shared textures of a stream (legacy shared handles; they need no
-/// closing).
+/// New shared textures of a stream: legacy shared handles, or NT handles
+/// (`nt`, from the bridge) that are closed when the ring is dropped.
 pub(crate) struct Ring {
     pub generation: u64,
     pub size: (u32, u32),
     pub handles: [usize; RING],
+    pub nt: bool,
+}
+
+impl Drop for Ring {
+    fn drop(&mut self) {
+        if self.nt {
+            for h in self.handles {
+                // SAFETY: NT handles the bridge created for this ring only.
+                unsafe {
+                    let _ = CloseHandle(HANDLE(h as *mut _));
+                }
+            }
+        }
+    }
 }
 
 /// The newest frame drawn into a shared texture: ready on the GPU once the
@@ -70,6 +92,8 @@ pub(crate) struct Published {
     pub value: u64,
     /// The same picture drawn again (mpv asked for a redraw).
     pub redraw: bool,
+    /// Copied over from another GPU (by the bridge).
+    pub copied: bool,
 }
 
 type Reply = mpsc::Sender<Result<(), String>>;
@@ -158,17 +182,35 @@ impl Worker {
             .name(format!("gk-render-{index}"))
             .spawn(move || {
                 let setup = device_on(luid).and_then(|(device, context)| {
-                    let fences = match delivery {
-                        Delivery::Shared { main_fence } => Some(open_fences(&device, &context, main_fence, &s)?),
-                        Delivery::Readback => None,
-                    };
-                    Ok((device, context, fences))
+                    let (mut fences, mut bridge) = (None, None);
+                    match delivery {
+                        Delivery::Shared { main_fence } => {
+                            fences = Some(open_fences(&device, &context, main_fence, &s)?)
+                        }
+                        Delivery::Bridge { main_luid, main_fence } => {
+                            let wake = s.clone();
+                            match Bridge::new(&device, &context, main_luid, main_fence, Arc::new(move || wake.poke())) {
+                                Ok((b, handle)) => {
+                                    if let Ok(mut f) = s.fence.lock() {
+                                        *f = Some(handle);
+                                    }
+                                    log::info!("render worker {index}: frames go GPU to GPU (cross-adapter heap)");
+                                    bridge = Some(b);
+                                }
+                                Err(e) => {
+                                    log::warn!("render worker {index}: no GPU-to-GPU copy ({e}); frames are read back")
+                                }
+                            }
+                        }
+                        Delivery::Readback => {}
+                    }
+                    Ok((device, context, fences, bridge))
                 });
                 match setup {
-                    Ok((device, context, fences)) => {
+                    Ok((device, context, fences, bridge)) => {
                         let _ = tx.send(Ok(()));
                         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            run(&s, &device, &context, fences, &*frame_ready)
+                            run(&s, &device, &context, fences, bridge, &*frame_ready)
                         }));
                         if r.is_err() {
                             log::error!("render worker {index} panicked");
@@ -211,20 +253,11 @@ impl Drop for Worker {
 }
 
 /// A device with video support on the adapter with `luid`.
-fn device_on(luid: (u32, i32)) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
+pub(crate) fn device_on(luid: (u32, i32)) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
     let e = |e: windows::core::Error| e.to_string();
+    let adapter = bridge::adapter(luid)?;
     // SAFETY: COM calls with valid out values.
     unsafe {
-        let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(e)?;
-        let mut i = 0;
-        let adapter = loop {
-            let a = factory.EnumAdapters1(i).map_err(|_| "that GPU is not present".to_owned())?;
-            i += 1;
-            let d = a.GetDesc1().map_err(e)?;
-            if (d.AdapterLuid.LowPart, d.AdapterLuid.HighPart) == luid {
-                break a;
-            }
-        };
         let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
         let (mut device, mut context) = (None, None);
         D3D11CreateDevice(
@@ -305,6 +338,7 @@ struct RingTarget {
 enum Target {
     Readback(ReadbackTarget),
     Ring(RingTarget),
+    Bridge(bridge::Target),
 }
 
 impl Target {
@@ -312,6 +346,7 @@ impl Target {
         match self {
             Target::Readback(t) => t.size,
             Target::Ring(t) => t.size,
+            Target::Bridge(t) => t.size,
         }
     }
 }
@@ -322,7 +357,14 @@ struct Surface {
     pending: bool,
     pending_kind: FrameKind,
     due_ns: Option<i64>,
+    /// A new tile size and since when (bridged targets wait for it to hold).
+    resize: Option<((u32, u32), Instant)>,
+    /// Bridged targets being built: size and generation.
+    building: Option<((u32, u32), u64)>,
 }
+
+/// How long a tile size must hold before a bridged target is remade.
+const RESIZE_SETTLE: Duration = Duration::from_millis(200);
 
 fn texture(device: &ID3D11Device, desc: &D3D11_TEXTURE2D_DESC) -> windows::core::Result<ID3D11Texture2D> {
     let mut t = None;
@@ -365,7 +407,7 @@ fn ring_target(device: &ID3D11Device, size: (u32, u32), generation: u64) -> wind
         // SAFETY: a texture created with MISC_SHARED.
         *h = unsafe { t.cast::<IDXGIResource>()?.GetSharedHandle()? }.0 as usize;
     }
-    Ok((RingTarget { tex, size, generation, next: 0 }, Ring { generation, size, handles }))
+    Ok((RingTarget { tex, size, generation, next: 0 }, Ring { generation, size, handles, nt: false }))
 }
 
 /// Reads a finished copy: tightly packed RGBA rows, or `None` while that
@@ -395,6 +437,7 @@ fn run(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     mut fences: Option<Fences>,
+    mut bridge: Option<Bridge>,
     frame_ready: &(dyn Fn() + Send + Sync),
 ) {
     let mut surfaces: HashMap<u64, Surface> = HashMap::new();
@@ -436,11 +479,46 @@ fn run(
             std::mem::take(&mut *r)
         };
         if req.quit {
+            if let Some(b) = bridge.as_mut() {
+                b.finish();
+            }
             return;
         }
+        if let Some(b) = bridge.as_mut() {
+            b.collect();
+            // Finished builds: the stream switches over (or reads back if
+            // its build failed). Builds nobody waits for any more are freed.
+            for (id, generation, r) in b.take_made() {
+                let Some(s) = surfaces.get_mut(&id).filter(|s| s.building.is_some_and(|(_, g)| g == generation)) else {
+                    continue;
+                };
+                let size = s.building.map_or((16, 16), |(sz, _)| sz);
+                s.building = None;
+                let made = match r {
+                    Ok((t, ring)) => {
+                        if let Ok(mut r) = shared.rings.lock() {
+                            r.insert(id, ring);
+                        }
+                        Some(Target::Bridge(t))
+                    }
+                    Err(e) => {
+                        log::warn!("stream {id}: no GPU-to-GPU copy ({e}); read back");
+                        readback_target(device, size).ok().map(Target::Readback)
+                    }
+                };
+                if let Some(t) = made
+                    && let Some(Target::Bridge(old)) = s.target.replace(t)
+                {
+                    b.retire(old);
+                }
+            }
+        }
         for (id, reply) in req.remove {
-            if surfaces.remove(&id).is_some() {
+            if let Some(s) = surfaces.remove(&id) {
                 shared.streams.fetch_sub(1, Ordering::Relaxed);
+                if let (Some(Target::Bridge(t)), Some(b)) = (s.target, bridge.as_mut()) {
+                    b.retire(t);
+                }
             }
             if let Ok(mut f) = shared.frames.lock() {
                 f.remove(&id);
@@ -466,7 +544,15 @@ fn run(
                     render.set_update_callback(move || s.poke());
                     surfaces.insert(
                         id,
-                        Surface { render, target: None, pending: true, pending_kind: FrameKind::None, due_ns: None },
+                        Surface {
+                            render,
+                            target: None,
+                            pending: true,
+                            pending_kind: FrameKind::None,
+                            due_ns: None,
+                            resize: None,
+                            building: None,
+                        },
                     );
                     shared.streams.fetch_add(1, Ordering::Relaxed);
                     shared.dirty.store(true, Ordering::Release);
@@ -514,21 +600,55 @@ fn run(
             }
             s.pending = false;
             s.due_ns = None;
-            let want = sizes.get(id).copied().unwrap_or((16, 16));
-            if s.target.as_ref().map(Target::size) != Some(want) {
+            let known = sizes.get(id).copied();
+            let want = known.unwrap_or((16, 16));
+            let have = s.target.as_ref().map(Target::size);
+            // A bridged target takes 10-30 ms to make: while a tile is being
+            // resized, keep drawing at the old size (the main thread scales
+            // it) until the size holds still.
+            let settling = have != Some(want)
+                && matches!(s.target, Some(Target::Bridge(_)))
+                && match s.resize {
+                    Some((w, at)) if w == want => at.elapsed() < RESIZE_SETTLE,
+                    _ => {
+                        s.resize = Some((want, Instant::now()));
+                        true
+                    }
+                };
+            if have != Some(want)
+                && !settling
+                && let Some(b) = bridge.as_ref().filter(|_| fences.is_none())
+            {
+                // Bridged: built on the builder thread; until then the old
+                // target (if any) is drawn, or the frame waits.
+                s.resize = None;
+                if known.is_some() && s.building.map(|(sz, _)| sz) != Some(want) {
+                    generation += 1;
+                    s.building = Some((want, generation));
+                    b.request(*id, want, generation);
+                }
+                if s.target.is_none() {
+                    continue;
+                }
+            } else if have != Some(want) && !settling {
+                s.resize = None;
                 let made = if fences.is_some() {
                     generation += 1;
-                    ring_target(device, want, generation).map(|(t, ring)| {
+                    ring_target(device, want, generation).map_err(|e| e.to_string()).map(|(t, ring)| {
                         if let Ok(mut r) = shared.rings.lock() {
                             r.insert(*id, ring);
                         }
                         Target::Ring(t)
                     })
                 } else {
-                    readback_target(device, want).map(Target::Readback)
+                    readback_target(device, want).map_err(|e| e.to_string()).map(Target::Readback)
                 };
                 match made {
-                    Ok(t) => s.target = Some(t),
+                    Ok(t) => {
+                        if let (Some(Target::Bridge(old)), Some(b)) = (s.target.replace(t), bridge.as_mut()) {
+                            b.retire(old);
+                        }
+                    }
                     Err(e) => {
                         log::error!("stream texture {want:?} on a render worker: {e}");
                         continue;
@@ -571,9 +691,42 @@ fn run(
                     }
                     if let Ok(mut p) = shared.published.lock() {
                         let redraw = s.pending_kind == FrameKind::Redraw;
-                        p.insert(*id, Published { generation: t.generation, index: i, value: f.value, redraw });
+                        p.insert(
+                            *id,
+                            Published { generation: t.generation, index: i, value: f.value, redraw, copied: false },
+                        );
                     }
                     t.next = (i + 1) % RING;
+                    any = true;
+                }
+                Some(Target::Bridge(t)) => {
+                    let Some(b) = bridge.as_mut() else { continue };
+                    let slot_free = b.begin(t);
+                    // SAFETY: a render-target texture on mpv's device; the
+                    // GPU waited for the copy out of it (`begin`).
+                    if let Err(e) = unsafe { s.render.render_d3d11(t.tex.as_raw(), false) } {
+                        log::warn!("stream {id} on another GPU: {e}");
+                        continue;
+                    }
+                    s.render.report_swap();
+                    if s.pending_kind == FrameKind::Repeat || !slot_free {
+                        if let Ok(mut r) = shared.repeats.lock() {
+                            *r.entry(*id).or_default() += 1;
+                        }
+                        continue;
+                    }
+                    let i = t.next;
+                    let released = shared
+                        .released
+                        .lock()
+                        .ok()
+                        .and_then(|r| r.get(id).filter(|(g, _)| *g == t.generation).map(|(_, v)| v[i]))
+                        .unwrap_or(0);
+                    let (i, value) = b.submit(t, released, context);
+                    if let Ok(mut p) = shared.published.lock() {
+                        let redraw = s.pending_kind == FrameKind::Redraw;
+                        p.insert(*id, Published { generation: t.generation, index: i, value, redraw, copied: true });
+                    }
                     any = true;
                 }
                 Some(Target::Readback(t)) => {

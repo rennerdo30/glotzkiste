@@ -7,6 +7,8 @@
 //! replays the last UI with fresh texture contents. At most one present per
 //! display refresh (waitable swap chain, frame latency 1).
 
+#[cfg(windows)]
+mod bridge;
 mod d3d;
 #[cfg(windows)]
 mod egui_d3d;
@@ -61,6 +63,8 @@ pub struct Stats {
     /// Frames of streams on other GPUs copied over, their bytes and the
     /// time spent (readback there plus upload here), in microseconds.
     pub copied_frames: AtomicU64,
+    /// Of those, copied GPU to GPU (no CPU time; not in `copy_us`).
+    pub gpu_copied_frames: AtomicU64,
     pub copied_bytes: AtomicU64,
     pub copy_us: AtomicU64,
     /// Per stream: frames drawn into its tile and the tile texture size.
@@ -81,6 +85,8 @@ pub struct TileStats {
     pub redraws: u64,
     /// Frames copied over from another GPU and the time that took (us).
     pub copied: u64,
+    /// Of those, copied GPU to GPU.
+    pub gpu_copied: u64,
     pub copy_us: u64,
 }
 

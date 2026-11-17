@@ -40,7 +40,8 @@ pub struct Rates {
     /// Repeat and redraw renders per second (no new picture).
     pub tile_extra: HashMap<u64, (f64, f64)>,
     pub tiles: HashMap<u64, TileStats>,
-    /// Milliseconds per frame copied over from another GPU, per stream.
+    /// CPU milliseconds per frame copied over from another GPU (read back),
+    /// per stream; GPU-to-GPU copies cost the CPU nothing and are left out.
     pub tile_copy_ms: HashMap<u64, f64>,
     /// Dropped frames per second per stream: (at the output, in the decoder).
     pub drop_rates: HashMap<u64, (f64, f64)>,
@@ -127,7 +128,7 @@ impl Sampler {
             cpu_100ns: cpu,
             tiles: tiles.iter().map(|(k, v)| (*k, v.frames)).collect(),
             extra: tiles.iter().map(|(k, v)| (*k, (v.repeats, v.redraws))).collect(),
-            copies: tiles.iter().map(|(k, v)| (*k, (v.copied, v.copy_us))).collect(),
+            copies: tiles.iter().map(|(k, v)| (*k, (v.copied - v.gpu_copied, v.copy_us))).collect(),
             drops,
         };
         if let Some(l) = &self.last {
@@ -285,7 +286,7 @@ pub fn stream_table(
             "Dropped",
             RichText::new(format!("{drops}  ({})", parts.join(", "))).color(if drops == 0 { GOOD } else { WARN }),
         );
-        let (dec, dec_col) = decoder_label(status, s);
+        let (dec, dec_col) = decoder_label(status, s, tile.gpu_copied > 0);
         row(ui, "Decoder", RichText::new(dec).color(dec_col));
         let behind = s.cache_s + s.pipe_s;
         let lat_color = if behind <= 1.2 {
@@ -478,14 +479,17 @@ pub fn bottleneck(status: &Status, s: &StreamStats, rates: &Rates, id: u64) -> O
     Some((Limit::None, format!("keeps up: {shown:.0} of {expected:.0} fps{note}")))
 }
 
-fn decoder_label(status: &Status, s: &StreamStats) -> (String, Color32) {
+fn decoder_label(status: &Status, s: &StreamStats, gpu_copy: bool) -> (String, Color32) {
     use crate::stream::DecodeOn;
     if !matches!(status.state, State::Playing) || status.in_ad {
         return ("—".into(), MUTED);
     }
     match status.decode_on {
         DecodeOn::Cpu => ("CPU (GPU decoders full)".into(), WARN),
-        DecodeOn::Second(_) if s.hwdec.contains("d3d11") => (format!("{} · copied", status.decoder), GOOD),
+        DecodeOn::Second(_) if s.hwdec.contains("d3d11") && gpu_copy => {
+            (format!("{} · GPU copy", status.decoder), GOOD)
+        }
+        DecodeOn::Second(_) if s.hwdec.contains("d3d11") => (format!("{} · CPU copy", status.decoder), GOOD),
         DecodeOn::Gpu if s.hwdec.contains("d3d11") => (format!("{} · zero-copy", status.decoder), GOOD),
         _ if s.hwdec.is_empty() || s.hwdec == "no" => ("software".into(), WARN),
         _ => (s.hwdec.clone(), TEXT),
@@ -814,7 +818,7 @@ fn stream_rows(ui: &mut egui::Ui, c: &mut Ctx<'_>, streams: &[&TileRect]) {
                 let tile = c.rates.tiles.get(&r.id).copied().unwrap_or_default();
                 let res = format!("{} · {}×{}", st.current, tile.width, tile.height);
                 cell(ui, w[8], RichText::new(&res).color(TEXT), hover).on_hover_text(res);
-                let (dec, col) = decoder_label(st, s);
+                let (dec, col) = decoder_label(st, s, tile.gpu_copied > 0);
                 cell(ui, w[9], RichText::new(&dec).color(col), hover).on_hover_text(dec);
             });
         }
