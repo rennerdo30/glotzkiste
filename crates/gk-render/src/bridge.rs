@@ -118,6 +118,8 @@ pub(crate) struct Target {
     slot_value: [u64; RING],
     /// Frame number of the last copy out of `tex`.
     last: u64,
+    /// The one before it (two frames may be in flight).
+    before_last: u64,
 }
 
 /// Adapter with `luid`.
@@ -446,6 +448,7 @@ impl Maker {
                     next: 0,
                     slot_value: [0; RING],
                     last: 0,
+                    before_last: 0,
                 },
                 ring,
             ))
@@ -457,10 +460,11 @@ impl Bridge {
     /// Before drawing into `t.tex`: makes the D3D11 GPU wait until the last
     /// copy out of it is done. False if the next slot's previous copy has
     /// not finished (skip this frame's copy then).
-    /// The stream's last frame is not through both copies yet.
+    /// The stream's frame before the last is not through both copies yet
+    /// (two frames may be in flight).
     pub fn behind(&self, t: &Target) -> bool {
         // SAFETY: reading a fence value.
-        t.last > 0 && unsafe { self.done.GetCompletedValue() } < t.last
+        t.before_last > 0 && unsafe { self.done.GetCompletedValue() } < t.before_last
     }
 
     pub fn begin(&self, t: &Target) -> bool {
@@ -500,6 +504,7 @@ impl Bridge {
             let _ = self.queue_main.Signal(&self.done, v);
         }
         t.slot_value[i] = v;
+        t.before_last = t.last;
         t.last = v;
         t.next = (i + 1) % RING;
         (i, v)

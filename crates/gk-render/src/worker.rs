@@ -35,7 +35,14 @@ use windows::Win32::Graphics::Dxgi::*;
 use windows::core::{Interface, PCWSTR};
 
 /// Shared textures per stream on the main GPU.
-pub(crate) const RING: usize = 3;
+/// Four: two frames in flight on the GPU, one shown, one spare, so a frame
+/// being drawn never overwrites one the main thread may still show.
+pub(crate) const RING: usize = 4;
+
+/// Unfinished frames a stream may have on the GPU. One capped streams at
+/// one frame per decoder latency (about 12 fps with a full decoder); more
+/// would queue without limit and block the worker in the driver.
+const IN_FLIGHT: usize = 2;
 
 /// How a worker hands its frames to the main render thread.
 #[derive(Clone, Copy)]
@@ -334,8 +341,8 @@ struct RingTarget {
     size: (u32, u32),
     generation: u64,
     next: usize,
-    /// Fence value of the last frame handed over.
-    last: u64,
+    /// Fence values of the last frames handed over, oldest first.
+    recent: [u64; IN_FLIGHT],
 }
 
 enum Target {
@@ -404,13 +411,20 @@ fn ring_target(device: &ID3D11Device, size: (u32, u32), generation: u64) -> wind
     let mut desc = base_desc(size);
     desc.BindFlags = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
     desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED.0 as u32;
-    let tex = [texture(device, &desc)?, texture(device, &desc)?, texture(device, &desc)?];
+    let tex: [ID3D11Texture2D; RING] = (0..RING)
+        .map(|_| texture(device, &desc))
+        .collect::<windows::core::Result<Vec<_>>>()?
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("RING textures"));
     let mut handles = [0usize; RING];
     for (h, t) in handles.iter_mut().zip(&tex) {
         // SAFETY: a texture created with MISC_SHARED.
         *h = unsafe { t.cast::<IDXGIResource>()?.GetSharedHandle()? }.0 as usize;
     }
-    Ok((RingTarget { tex, size, generation, next: 0, last: 0 }, Ring { generation, size, handles, nt: false }))
+    Ok((
+        RingTarget { tex, size, generation, next: 0, recent: [0; IN_FLIGHT] },
+        Ring { generation, size, handles, nt: false },
+    ))
 }
 
 /// Reads a finished copy: tightly packed RGBA rows, or `None` while that
@@ -669,7 +683,7 @@ fn run(
                     // skipped instead of queued. An unbounded queue made the
                     // driver block this thread and starved the window.
                     // SAFETY: reading this worker's fence.
-                    if t.last > 0 && unsafe { f.own.GetCompletedValue() } < t.last {
+                    if t.recent[0] > 0 && unsafe { f.own.GetCompletedValue() } < t.recent[0] {
                         continue;
                     }
                     let i = t.next;
@@ -703,7 +717,8 @@ fn run(
                         let _ = f.context.Signal(&f.own, f.value);
                         context.Flush();
                     }
-                    t.last = f.value;
+                    t.recent.rotate_left(1);
+                    t.recent[IN_FLIGHT - 1] = f.value;
                     if let Ok(mut p) = shared.published.lock() {
                         let redraw = s.pending_kind == FrameKind::Redraw;
                         p.insert(

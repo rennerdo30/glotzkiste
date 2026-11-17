@@ -860,10 +860,16 @@ impl App {
         // from the CPU to any GPU with room, else from a GPU whose decoder is
         // at 60 % or more to an earlier GPU in order (the main GPU last)
         // with room. Streams placed by hand stay.
-        let settled = self.valve.last_move.is_none_or(|t| t.elapsed() >= Duration::from_secs(6));
+        // A full decoder (90 % or more) is relieved faster: up to four
+        // streams every two seconds (with a hundred streams one per six
+        // seconds left the iGPU at 14 % while the main decoder was full).
+        let full = gpus.iter().any(|g| g.decode_pct >= 90.0);
+        let (per_step, settle) = if full { (4, 2) } else { (1, 6) };
+        let settled = self.valve.last_move.is_none_or(|t| t.elapsed() >= Duration::from_secs(settle));
         if moved || !settled {
             return;
         }
+        let mut done = 0;
         let load = |l: (u32, i32)| gpus.iter().find(|g| g.luid == l).map_or(0.0, |g| g.decode_pct);
         let mut candidates: Vec<&(u64, Status)> =
             playing.iter().filter(|(id, _)| !self.pinned.contains(id) && !recently(&self.valve.moved, *id)).collect();
@@ -887,7 +893,10 @@ impl App {
             self.streams[id].send(Cmd::Decoder(to));
             self.valve.moved.insert(*id, Instant::now());
             self.valve.last_move = Some(Instant::now());
-            break;
+            done += 1;
+            if done >= per_step {
+                break;
+            }
         }
     }
 

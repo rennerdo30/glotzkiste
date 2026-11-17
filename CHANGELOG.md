@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Two unfinished frames per stream on the GPU (four shared textures per stream): with a full decoder one frame in flight capped every stream at about 12 fps. Balancing moves up to four streams every two seconds while a video decoder is at 90 % or more.
 - **Starting a hundred streams:** a stream waits for its render worker (up to 30 s) instead of falling back to the render thread after 3 s. The fallback put half of all streams on the render thread (91 % of a core, 24 presents/s) and gave some players two render contexts (mpv error -20). Compiled shaders are cached on disk.
 - **Full speed in the background:** Glotzkiste opts out of Windows' power throttling (EcoQoS) and keeps its 1 ms timers while the window is hidden or minimized; the render threads run as multimedia playback threads (MMCSS).
 - **Overloaded decoders no longer starve every tile:** each stream keeps at most one unfinished frame on the GPU (a frame is skipped while the previous one is still being drawn), so the render workers stay responsive and the window always has finished frames to show (GK-20, second part).

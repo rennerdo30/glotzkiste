@@ -448,7 +448,7 @@ struct Linked {
     generation: u64,
     views: Vec<ID3D11ShaderResourceView>,
     /// The newest frame (texture, worker fence value) not yet waited for.
-    ready: Option<(usize, u64)>,
+    ready: Vec<(usize, u64)>,
     /// The texture the next present samples.
     shown: Option<usize>,
     size: (u32, u32),
@@ -703,7 +703,7 @@ impl Renderer {
                     };
                     // Worker frames the GPU has not finished yet: look again
                     // shortly (never wait on the GPU for them).
-                    if self.linked.values().any(|l| l.ready.is_some()) {
+                    if self.linked.values().any(|l| !l.ready.is_empty()) {
                         deadline = Some(deadline.map_or(READY_POLL, |d| d.min(READY_POLL)));
                     }
                     match deadline {
@@ -894,12 +894,17 @@ impl Renderer {
     fn promote_ready(&mut self) -> bool {
         let mut changed = false;
         for (id, l) in self.linked.iter_mut() {
-            let Some((i, value)) = l.ready else { continue };
+            if l.ready.is_empty() {
+                continue;
+            }
             let Some(f) = self.worker_fences.get(&l.worker) else { continue };
             // SAFETY: reading a fence value.
-            if unsafe { f.GetCompletedValue() } >= value {
-                l.ready = None;
-                l.shown = Some(i);
+            let done = unsafe { f.GetCompletedValue() };
+            // The newest finished frame; older ones are dropped, newer ones
+            // stay pending.
+            if let Some(k) = l.ready.iter().rposition(|(_, v)| *v <= done) {
+                l.shown = Some(l.ready[k].0);
+                l.ready.drain(..=k);
                 changed |= self.videos.iter().any(|v| v.id == *id);
             }
         }
@@ -939,7 +944,7 @@ impl Renderer {
                             worker: w.index,
                             generation: ring.generation,
                             views,
-                            ready: None,
+                            ready: Vec::new(),
                             shown: None,
                             size: ring.size,
                         };
@@ -957,7 +962,9 @@ impl Renderer {
                 if l.generation != p.generation {
                     continue;
                 }
-                l.ready = Some((p.index, p.value));
+                // Kept in order; a slot drawn again replaces its old entry.
+                l.ready.retain(|(i, _)| *i != p.index);
+                l.ready.push((p.index, p.value));
                 let visible = self.videos.iter().any(|v| v.id == id);
                 if !p.redraw {
                     stats.video_frames.fetch_add(1, Ordering::Relaxed);
