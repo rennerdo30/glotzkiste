@@ -74,6 +74,77 @@ pub struct Tab {
     /// The stream that has the sound in this tab.
     #[serde(default)]
     pub audio: Option<String>,
+    /// Grid tiles bigger than one cell (GK-16); empty: the plain grid.
+    #[serde(default)]
+    pub spans: Vec<Span>,
+}
+
+/// A grid tile spanning `w` x `h` cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Span {
+    pub tile: TileId,
+    pub w: u8,
+    pub h: u8,
+}
+
+/// The largest span of a tile, in cells.
+pub const MAX_SPAN: u32 = 4;
+
+/// A tab that can be drawn as a packed grid: the grid's tiles in order and,
+/// if the tab has a chat column, the body's share and the chat panes.
+pub struct Packable {
+    pub grid: Vec<TileId>,
+    pub chat: Option<(f32, Vec<TileId>)>,
+}
+
+/// Places tiles of `spans` (w, h cells) in a packed grid for an area of
+/// `size`: each tile takes the first free spot in reading order, so a
+/// bigger tile pushes the others along. Picks the column count that gives
+/// the videos (16:9) the most room. Returns columns, rows and positions.
+pub fn pack(spans: &[(u32, u32)], size: (f32, f32)) -> (u32, u32, Vec<(u32, u32)>) {
+    let max_w = spans.iter().map(|s| s.0).max().unwrap_or(1).max(1);
+    let area: u32 = spans.iter().map(|s| s.0 * s.1).sum::<u32>().max(1);
+    let mut best = (1, 1, Vec::new());
+    let mut best_w = -1.0f32;
+    for cols in max_w..=area.max(max_w).min(16) {
+        let (pos, rows) = first_fit(spans, cols);
+        let (cw, ch) = (size.0 / cols as f32, size.1 / rows.max(1) as f32);
+        let video_w = cw.min(ch * 16.0 / 9.0);
+        if video_w > best_w + 0.5 {
+            best_w = video_w;
+            best = (cols, rows, pos);
+        }
+    }
+    best
+}
+
+fn first_fit(spans: &[(u32, u32)], cols: u32) -> (Vec<(u32, u32)>, u32) {
+    let mut used: Vec<Vec<bool>> = Vec::new();
+    let mut out = Vec::with_capacity(spans.len());
+    for &(w, h) in spans {
+        let (w, h) = (w.clamp(1, cols), h.max(1));
+        let mut y = 0u32;
+        'search: loop {
+            for x in 0..=cols - w {
+                let free =
+                    (y..y + h).all(|yy| (x..x + w).all(|xx| used.get(yy as usize).is_none_or(|row| !row[xx as usize])));
+                if free {
+                    for yy in y..y + h {
+                        while used.len() <= yy as usize {
+                            used.push(vec![false; cols as usize]);
+                        }
+                        for xx in x..x + w {
+                            used[yy as usize][xx as usize] = true;
+                        }
+                    }
+                    out.push((x, y));
+                    break 'search;
+                }
+            }
+            y += 1;
+        }
+    }
+    (out, used.len() as u32)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +186,7 @@ fn new_id() -> egui::Id {
 impl Tab {
     pub fn new(title: &str, panes: Vec<Pane>) -> Self {
         let panes = if panes.is_empty() { vec![Pane::Empty] } else { panes };
-        Self { title: title.to_owned(), tree: Tree::new_grid(new_id(), panes), audio: None }
+        Self { title: title.to_owned(), tree: Tree::new_grid(new_id(), panes), audio: None, spans: Vec::new() }
     }
 
     /// Panes in reading order (depth first from the root).
@@ -160,6 +231,57 @@ impl Tab {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The tile's span in a packed grid (1 x 1 unless set).
+    pub fn span_of(&self, tile: TileId) -> (u32, u32) {
+        self.spans.iter().find(|s| s.tile == tile).map_or((1, 1), |s| (u32::from(s.w), u32::from(s.h)))
+    }
+
+    /// Sets a tile's span; 1 x 1 removes it.
+    pub fn set_span(&mut self, tile: TileId, w: u32, h: u32) {
+        self.spans.retain(|s| s.tile != tile && self.tree.tiles.get(s.tile).is_some());
+        let (w, h) = (w.clamp(1, MAX_SPAN), h.clamp(1, MAX_SPAN));
+        if (w, h) != (1, 1) {
+            self.spans.push(Span { tile, w: w as u8, h: h as u8 });
+        }
+    }
+
+    /// The grid this tab can draw packed: a grid of streams as the root,
+    /// or beside a chat column.
+    pub fn packable(&self) -> Option<Packable> {
+        let tiles = &self.tree.tiles;
+        let is_stream_grid = |id: TileId| match tiles.get(id) {
+            Some(Tile::Container(c @ Container::Grid(_))) => {
+                let kids: Vec<TileId> = c.children().copied().collect();
+                (!kids.is_empty() && kids.iter().all(|k| matches!(tiles.get(*k), Some(Tile::Pane(Pane::Stream(_))))))
+                    .then_some(kids)
+            }
+            _ => None,
+        };
+        let root = self.tree.root()?;
+        if let Some(grid) = is_stream_grid(root) {
+            return Some(Packable { grid, chat: None });
+        }
+        let Some(Tile::Container(Container::Linear(l))) = tiles.get(root) else { return None };
+        if l.dir != LinearDir::Horizontal || l.children.len() != 2 {
+            return None;
+        }
+        let (body, side) = (l.children[0], l.children[1]);
+        let grid = is_stream_grid(body)?;
+        let chats: Vec<TileId> = match tiles.get(side) {
+            Some(Tile::Pane(Pane::Chat { .. })) => vec![side],
+            Some(Tile::Container(Container::Linear(v)))
+                if v.dir == LinearDir::Vertical
+                    && v.children.iter().all(|c| matches!(tiles.get(*c), Some(Tile::Pane(Pane::Chat { .. })))) =>
+            {
+                v.children.clone()
+            }
+            _ => return None,
+        };
+        let total = l.shares[body] + l.shares[side];
+        let share = if total > 0.0 { l.shares[body] / total } else { 0.78 };
+        Some(Packable { grid, chat: Some((share, chats)) })
     }
 
     fn chat_panes(&self) -> Vec<Pane> {
@@ -254,6 +376,7 @@ impl Tab {
             }
         };
         self.tree = Tree::new(new_id(), root, tiles);
+        self.spans.clear();
     }
 
     /// Adds a stream: fills an empty pane, else joins the main stream group.
@@ -447,6 +570,50 @@ mod tests {
 
     fn streams(t: &Tab) -> Vec<String> {
         t.stream_channels()
+    }
+
+    #[test]
+    fn packing_pushes_tiles_along() {
+        // Four 1x1 in a wide area: one row or 2x2, never a column.
+        let (c, r, p) = pack(&[(1, 1); 4], (1600.0, 900.0));
+        assert_eq!((c, r), (2, 2));
+        assert_eq!(p, vec![(0, 0), (1, 0), (0, 1), (1, 1)]);
+        // The first tile 2x2: the others flow around it.
+        let (c, r, p) = pack(&[(2, 2), (1, 1), (1, 1), (1, 1)], (1600.0, 900.0));
+        assert_eq!((c, r), (3, 3), "{p:?}");
+        assert_eq!(p, vec![(0, 0), (2, 0), (2, 1), (0, 2)]);
+        // Every tile placed, none overlapping.
+        let spans = [(2, 1), (1, 2), (1, 1), (3, 1), (1, 1), (2, 2)];
+        let (c, _, p) = pack(&spans, (1920.0, 1080.0));
+        let mut cells = std::collections::HashSet::new();
+        for (s, (x, y)) in spans.iter().zip(&p) {
+            assert!(x + s.0.min(c) <= c);
+            for yy in *y..y + s.1 {
+                for xx in *x..x + s.0.min(c) {
+                    assert!(cells.insert((xx, yy)), "overlap at {xx},{yy}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spans_and_packable_tabs() {
+        let mut tab = Tab::new("t", (0..4).map(|i| Pane::stream(&format!("s{i}"))).collect());
+        tab.apply(Preset::Grid, None);
+        let p = tab.packable().expect("a grid of streams");
+        assert_eq!(p.grid.len(), 4);
+        assert!(p.chat.is_none());
+        tab.set_span(p.grid[0], 2, 9);
+        assert_eq!(tab.span_of(p.grid[0]), (2, MAX_SPAN));
+        tab.set_span(p.grid[0], 1, 1);
+        assert!(tab.spans.is_empty());
+        tab.add_chat_panel(Pane::chat("s0"));
+        let p = tab.packable().expect("grid beside a chat column");
+        assert_eq!(p.chat.as_ref().map(|c| c.1.len()), Some(1));
+        tab.set_span(p.grid[1], 2, 2);
+        tab.apply(Preset::Columns, None);
+        assert!(tab.spans.is_empty(), "a preset resets spans");
+        assert!(tab.packable().is_none(), "columns are not a grid");
     }
 
     #[test]

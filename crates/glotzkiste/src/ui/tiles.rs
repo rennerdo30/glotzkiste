@@ -17,6 +17,8 @@ use std::collections::HashMap;
 enum Act {
     Remove(TileId),
     AddChat(TileId, String),
+    /// A grid tile's new span in cells (GK-16).
+    Span(TileId, u32, u32),
     Audio(String),
     MuteAll,
     Maximize(TileId),
@@ -48,6 +50,10 @@ struct Behavior<'a> {
     tab_streams: Vec<String>,
     /// Where a stream can decode, in placement order.
     decode_menu: Vec<(DecodeOn, String)>,
+    /// Grid tiles that can be resized by their corner, with their span.
+    grid_tiles: HashMap<TileId, (u32, u32)>,
+    /// The cell size while the grid is drawn packed.
+    packed_cell: Option<egui::Vec2>,
 }
 
 /// A demo channel's display name ("~aurora" -> "Aurora").
@@ -170,6 +176,53 @@ impl Behavior<'_> {
             painter.rect_stroke(aligned.shrink(1.0), 0.0, egui::Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
         }
         let hovered = ui.rect_contains_pointer(rect);
+        // Grid tiles: a corner grip resizes this one tile in grid cells
+        // (GK-16); the others make room. Double-click: back to one cell.
+        if let Some(&span) = self.grid_tiles.get(&tile) {
+            let g = Rect::from_min_size(rect.max - vec2(20.0, 20.0), vec2(20.0, 20.0));
+            let r = ui.interact(g, egui::Id::NULL.with(("grip", tile)), Sense::click_and_drag());
+            let key = egui::Id::NULL.with(("grip-start", tile));
+            if r.drag_started() {
+                let cell = self
+                    .packed_cell
+                    .unwrap_or(vec2(rect.width() / span.0 as f32, rect.height() / span.1 as f32))
+                    .max(vec2(40.0, 40.0));
+                ui.ctx().data_mut(|d| d.insert_temp(key, (span, cell)));
+            }
+            if r.dragged()
+                && let Some(((w0, h0), cell)) = ui.ctx().data(|d| d.get_temp::<((u32, u32), egui::Vec2)>(key))
+                && let (Some(now), Some(from)) =
+                    (ui.ctx().pointer_interact_pos(), ui.input(|i| i.pointer.press_origin()))
+            {
+                let d = now - from;
+                let w = ((w0 as f32 * cell.x + d.x) / cell.x).round().clamp(1.0, crate::layout::MAX_SPAN as f32) as u32;
+                let h = ((h0 as f32 * cell.y + d.y) / cell.y).round().clamp(1.0, crate::layout::MAX_SPAN as f32) as u32;
+                if (w, h) != span {
+                    self.acts.push(Act::Span(tile, w, h));
+                }
+            }
+            if r.double_clicked() && span != (1, 1) {
+                self.acts.push(Act::Span(tile, 1, 1));
+            }
+            if hovered || r.dragged() {
+                if r.hovered() || r.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+                }
+                let col = if r.hovered() || r.dragged() { TEXT } else { MUTED };
+                for k in [6.0f32, 11.0, 16.0] {
+                    painter.line_segment(
+                        [pos2(g.max.x - 3.0, g.max.y - k - 1.0), pos2(g.max.x - k - 1.0, g.max.y - 3.0)],
+                        egui::Stroke::new(1.5, col),
+                    );
+                }
+                if r.hovered() && !r.dragged() {
+                    r.on_hover_text(format!(
+                        "Drag to make this tile bigger or smaller ({}×{} cells); double-click: one cell",
+                        span.0, span.1
+                    ));
+                }
+            }
+        }
         let mut response = UiResponse::None;
         if !hovered {
             if audible {
@@ -532,6 +585,48 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
     }
 }
 
+/// Draws a grid of streams packed (tiles spanning several cells) and the
+/// chat column beside it, without egui_tiles (it has no spanning grid).
+fn draw_packed(b: &mut Behavior, tab: &mut crate::layout::Tab, ui: &mut egui::Ui, p: &crate::layout::Packable) {
+    let gap = 3.0;
+    let full = ui.max_rect();
+    let (body, chats) = match &p.chat {
+        Some((share, chats)) => {
+            let x = full.min.x + (full.width() - gap) * share;
+            (
+                Rect::from_min_max(full.min, pos2(x, full.max.y)),
+                Some((Rect::from_min_max(pos2(x + gap, full.min.y), full.max), chats)),
+            )
+        }
+        None => (full, None),
+    };
+    let spans: Vec<(u32, u32)> = p.grid.iter().map(|id| tab.span_of(*id)).collect();
+    let (cols, rows, pos) = crate::layout::pack(&spans, (body.width(), body.height()));
+    let cell = vec2((body.width() + gap) / cols.max(1) as f32 - gap, (body.height() + gap) / rows.max(1) as f32 - gap);
+    b.packed_cell = Some(cell);
+    let mut draw = |b: &mut Behavior, tab: &mut crate::layout::Tab, id: TileId, rect: Rect| {
+        if let Some(egui_tiles::Tile::Pane(pane)) = tab.tree.tiles.get_mut(id) {
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("packed", id)));
+            child.set_clip_rect(rect);
+            let _ = egui_tiles::Behavior::pane_ui(b, &mut child, id, pane);
+        }
+    };
+    for ((id, (w, h)), (x, y)) in p.grid.iter().zip(&spans).zip(&pos) {
+        let (w, h) = (w.min(&cols), h);
+        let min = body.min + vec2(*x as f32 * (cell.x + gap), *y as f32 * (cell.y + gap));
+        let size = vec2(*w as f32 * cell.x + (*w - 1) as f32 * gap, *h as f32 * cell.y + (*h - 1) as f32 * gap);
+        draw(b, tab, *id, Rect::from_min_size(min, size));
+    }
+    if let Some((rect, chats)) = chats {
+        let n = chats.len().max(1) as f32;
+        let h = (rect.height() - gap * (n - 1.0)) / n;
+        for (i, id) in chats.iter().enumerate() {
+            let min = rect.min + vec2(0.0, i as f32 * (h + gap));
+            draw(b, tab, *id, Rect::from_min_size(min, vec2(rect.width(), h)));
+        }
+    }
+}
+
 pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, heights: &mut Vec<(u64, u32)>) {
     let ppp = ui.ctx().pixels_per_point();
     let active = app.active.min(app.tabs.len().saturating_sub(1));
@@ -549,6 +644,14 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
         });
     }
     let decode_menu = app.placer.lock().map(|p| p.menu()).unwrap_or_default();
+    // A grid of streams: each tile resizable by its corner; with a tile
+    // bigger than one cell the grid is drawn packed (GK-16).
+    let packable = app.tabs.get(active).and_then(|t| t.packable());
+    let grid_tiles: HashMap<TileId, (u32, u32)> = match (&packable, app.tabs.get(active)) {
+        (Some(p), Some(t)) => p.grid.iter().map(|id| (*id, t.span_of(*id))).collect(),
+        _ => HashMap::new(),
+    };
+    let packed = packable.filter(|_| app.tabs.get(active).is_some_and(|t| !t.spans.is_empty()));
     let mut b = Behavior {
         streams: &app.streams,
         chat: &mut app.chat,
@@ -567,6 +670,8 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
         chat_views: &mut app.chat_views,
         tab_streams,
         decode_menu,
+        grid_tiles,
+        packed_cell: None,
     };
     app.content_rect = ui.max_rect();
     let Some(tab) = app.tabs.get_mut(active) else { return };
@@ -577,6 +682,8 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(ui.max_rect()));
             let _ = egui_tiles::Behavior::pane_ui(&mut b, &mut child, id, pane);
         }
+    } else if let Some(p) = packed {
+        draw_packed(&mut b, tab, ui, &p);
     } else {
         tab.tree.ui(&mut b, ui);
     }
@@ -596,6 +703,11 @@ pub fn content(app: &mut App, ui: &mut egui::Ui, videos: &mut Vec<VideoTile>, he
                     if tab.audio.as_ref().is_some_and(|a| !streams.contains(a)) {
                         tab.audio = streams.first().cloned();
                     }
+                }
+            }
+            Act::Span(id, w, h) => {
+                if let Some(tab) = app.tabs.get_mut(active) {
+                    tab.set_span(id, w, h);
                 }
             }
             Act::AddChat(id, channel) => {

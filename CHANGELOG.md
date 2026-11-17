@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Resize one grid tile:** in a grid, drag a tile's bottom-right corner to make it span up to 4×4 cells; the other tiles flow around it, and double-clicking the corner makes it one cell again. A layout preset resets the sizes (GK-16).
 - **Several chat panels:** Layout → "+ Chat of …" or "+ Combined chat" stacks more chat panels in the column on the right; layout presets keep every chat panel (GK-17).
 - **Layout import and export** (Layout menu): save a tab as a `.json` file and open it again as a new tab, also on another PC (GK-18).
 - In a combined chat, the channel you write in follows the stream you listen to; a pick by hand holds until the next switch (GK-19).
