@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.0
+
 - **GPU to GPU:** frames of streams on your other GPUs reach the window GPU to GPU through memory both GPUs share (DirectX 12 cross-adapter heap), without a CPU copy; the render thread does about 40 % less work with four streams on an integrated GPU. Where that is not available, frames are read back as before (GK-3).
 - Stats: the decoder column says "GPU copy" or "CPU copy" for streams on another GPU; the copy time counts CPU copies only.
 
