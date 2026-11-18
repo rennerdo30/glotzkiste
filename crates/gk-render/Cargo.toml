@@ -1,15 +1,25 @@
 [package]
-name = "gk-render"
-description = "D3D11 render thread: stream textures, egui renderer, one present per refresh."
+name = "glotzkiste-render"
+description = "D3D11 renderer for Glotzkiste: stream textures, egui renderer, render workers, one present per refresh."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
+keywords = ["d3d11", "egui", "mpv", "video"]
+categories = ["multimedia::video", "gui"]
+include = ["/src/**", "/Cargo.toml"]
+
+# The code name stays gk_render (as in the app).
+[lib]
+name = "gk_render"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-pc-windows-msvc"]
 
 [dependencies]
 egui.workspace = true
-gk-mpv = { path = "../gk-mpv" }
+gk-mpv.workspace = true
 png = "0.18.1"
 log.workspace = true
 

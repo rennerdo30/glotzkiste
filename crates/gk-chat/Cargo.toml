@@ -1,11 +1,21 @@
 [package]
-name = "gk-chat"
-description = "Twitch chat over IRC/TLS on one background thread, message model and emote tokenizer."
+name = "glotzkiste-chat"
+description = "Twitch chat for Glotzkiste: IRC over TLS on one background thread, message model and emote tokenizer."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
+keywords = ["twitch", "chat", "irc", "emotes"]
+categories = ["network-programming"]
+include = ["/src/**", "/Cargo.toml"]
+
+# The code name stays gk_chat (as in the app).
+[lib]
+name = "gk_chat"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-pc-windows-msvc"]
 
 [dependencies]
 rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12", "logging", "ring"] }

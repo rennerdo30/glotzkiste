@@ -32,6 +32,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # Every crate builds from its packaged files, as on crates.io.
+      - run: cargo package --workspace --exclude gk-icon --locked
   installer:
     name: Windows setup (build and lifecycle)
     runs-on: windows-latest

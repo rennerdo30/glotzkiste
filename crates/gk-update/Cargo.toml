@@ -1,11 +1,21 @@
 [package]
-name = "gk-update"
+name = "glotzkiste-update"
 description = "Update checks for Glotzkiste: GitHub release discovery, version order, checksums, bounded HTTPS downloads."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
+keywords = ["updater", "github", "release", "checksum"]
+categories = ["network-programming"]
+include = ["/src/**", "/Cargo.toml"]
+
+# The code name stays gk_update (as in the app).
+[lib]
+name = "gk_update"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-pc-windows-msvc"]
 
 [dependencies]
 serde_json.workspace = true

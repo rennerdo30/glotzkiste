@@ -39,6 +39,7 @@ Download from the [latest release](https://github.com/rennerdo30/glotzkiste/rele
 
 - **Setup** (`glotzkiste-<version>-setup.exe`): installs for your Windows user only, no admin rights. Adds a Start menu entry (and a desktop shortcut if you like) and keeps itself up to date.
 - **Portable** (`glotzkiste-<version>-windows-x64.zip`): unpack anywhere and start `glotzkiste.exe`. Nothing to install; keep `libmpv-2.dll` next to it.
+- **With Cargo:** `cargo install glotzkiste` builds it from [crates.io](https://crates.io/crates/glotzkiste). It needs `libmpv-2.dll` next to `glotzkiste.exe` (in `%USERPROFILE%\.cargo\bin`) or on your `PATH`: take it from the portable zip. Updates come with `cargo install glotzkiste` again (the in-app updater serves the setup only).
 
 Windows 10 or 11, 64-bit, a CPU with AVX2 (most from 2015 on) and a GPU with Direct3D 11. The setup is not code-signed yet, so Windows may warn on first run: *More info*, then *Run anyway*. Every release lists the SHA-256 of its files in `SHA256SUMS.txt`.
 

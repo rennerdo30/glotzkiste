@@ -902,59 +902,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "gk-chat"
-version = "1.2.0"
-dependencies = [
- "log",
- "rustls",
- "webpki-roots",
-]
-
-[[package]]
 name = "gk-icon"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "ico",
  "resvg",
-]
-
-[[package]]
-name = "gk-mpv"
-version = "1.2.0"
-dependencies = [
- "libloading 0.9.1",
-]
-
-[[package]]
-name = "gk-render"
-version = "1.2.0"
-dependencies = [
- "egui",
- "gk-mpv",
- "log",
- "png",
- "windows",
-]
-
-[[package]]
-name = "gk-twitch"
-version = "1.2.0"
-dependencies = [
- "image",
- "log",
- "serde",
- "serde_json",
- "ureq",
- "windows",
-]
-
-[[package]]
-name = "gk-update"
-version = "1.2.0"
-dependencies = [
- "serde_json",
- "sha2",
- "ureq",
 ]
 
 [[package]]
@@ -975,23 +927,71 @@ dependencies = [
 
 [[package]]
 name = "glotzkiste"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "egui",
  "egui-winit",
  "egui_tiles",
  "embed-resource",
- "gk-chat",
- "gk-mpv",
- "gk-render",
- "gk-twitch",
- "gk-update",
+ "glotzkiste-chat",
+ "glotzkiste-mpv",
+ "glotzkiste-render",
+ "glotzkiste-twitch",
+ "glotzkiste-update",
  "log",
  "rfd",
  "serde",
  "serde_json",
  "windows",
  "winit",
+]
+
+[[package]]
+name = "glotzkiste-chat"
+version = "1.2.1"
+dependencies = [
+ "log",
+ "rustls",
+ "webpki-roots",
+]
+
+[[package]]
+name = "glotzkiste-mpv"
+version = "1.2.1"
+dependencies = [
+ "libloading 0.9.1",
+]
+
+[[package]]
+name = "glotzkiste-render"
+version = "1.2.1"
+dependencies = [
+ "egui",
+ "glotzkiste-mpv",
+ "log",
+ "png",
+ "windows",
+]
+
+[[package]]
+name = "glotzkiste-twitch"
+version = "1.2.1"
+dependencies = [
+ "image",
+ "log",
+ "serde",
+ "serde_json",
+ "ureq",
+ "windows",
+]
+
+[[package]]
+name = "glotzkiste-update"
+version = "1.2.1"
+dependencies = [
+ "serde_json",
+ "sha2",
+ "ureq",
 ]
 
 [[package]]

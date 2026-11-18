@@ -1,12 +1,21 @@
 [package]
-name = "gk-mpv"
+name = "glotzkiste-mpv"
 description = "Loads libmpv at runtime and wraps the parts of its C API that Glotzkiste uses."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+keywords = ["mpv", "libmpv", "video", "ffi"]
+categories = ["multimedia::video", "api-bindings"]
+include = ["/src/**", "/Cargo.toml"]
+
+# The code name stays gk_mpv (as in the app).
+[lib]
+name = "gk_mpv"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-pc-windows-msvc"]
 
 [dependencies]
 libloading = "0.9.1"

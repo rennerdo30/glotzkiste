@@ -1,7 +1,9 @@
 //! `cargo run -p gk-icon` writes `assets/logo/glotzkiste.ico` (16, 20, 24,
 //! 32, 40, 48, 64, 128, 256 px) and `assets/logo/glotzkiste-256.png` from
 //! `assets/logo/glotzkiste.svg`. Each size is rendered from the vector, not
-//! scaled down from a bitmap, so small sizes stay sharp.
+//! scaled down from a bitmap, so small sizes stay sharp. Both also go to
+//! `crates/glotzkiste/res/`, the copies the app embeds (a published crate
+//! carries only files inside it).
 
 use std::path::PathBuf;
 
@@ -23,6 +25,7 @@ fn main() {
         }
         if size == 256 {
             pixmap.save_png(root.join("assets/logo/glotzkiste-256.png")).expect("png");
+            pixmap.save_png(root.join("crates/glotzkiste/res/glotzkiste-256.png")).expect("png");
         }
         let image = ico::IconImage::from_rgba_data(size, size, rgba);
         // Classic bitmaps up to 128 px, PNG only for 256 px: some tools (the
@@ -37,5 +40,6 @@ fn main() {
     let out = root.join("assets/logo/glotzkiste.ico");
     let file = std::fs::File::create(&out).expect("create ico");
     dir.write(file).expect("write ico");
-    println!("wrote {}", out.display());
+    std::fs::copy(&out, root.join("crates/glotzkiste/res/glotzkiste.ico")).expect("copy ico");
+    println!("wrote {} and its copy in crates/glotzkiste/res", out.display());
 }

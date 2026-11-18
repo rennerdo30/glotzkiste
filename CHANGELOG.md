@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.2.1
+
+- **On crates.io:** `cargo install glotzkiste` builds the app; its parts are published as `glotzkiste-mpv`, `glotzkiste-twitch`, `glotzkiste-chat`, `glotzkiste-update` and `glotzkiste-render`. Nothing changes in the app itself; it needs `libmpv-2.dll` next to it or on `PATH` (from the portable zip).
+
 ## 1.2.0
 
 - **A cleaner look:** the logo in the top bar, pill tabs with an accent underline and stream count badges, one style for every icon button, a search field for adding channels, rounded tiles (the video too) with more air between them, a soft shade behind a tile's hover bar instead of a hard strip, a card for empty tabs (with "Random live streams"), roomier menus and dialogs with shadows.

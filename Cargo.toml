@@ -5,14 +5,21 @@ members = ["crates/*"]
 default-members = ["crates/gk-mpv", "crates/gk-twitch", "crates/gk-chat", "crates/gk-render", "crates/gk-update", "crates/glotzkiste"]
 
 [workspace.package]
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 rust-version = "1.100"
 license = "MIT"
-repository = ""
-publish = false
+repository = "https://github.com/rennerdo30/glotzkiste"
 
 [workspace.dependencies]
+# The app's own crates, published to crates.io as glotzkiste-* (their code
+# names stay gk_*). The version moves with the workspace version: a release
+# bumps both (docs/RELEASING.md).
+gk-mpv = { package = "glotzkiste-mpv", path = "crates/gk-mpv", version = "1.2.1" }
+gk-twitch = { package = "glotzkiste-twitch", path = "crates/gk-twitch", version = "1.2.1" }
+gk-chat = { package = "glotzkiste-chat", path = "crates/gk-chat", version = "1.2.1" }
+gk-update = { package = "glotzkiste-update", path = "crates/gk-update", version = "1.2.1" }
+gk-render = { package = "glotzkiste-render", path = "crates/gk-render", version = "1.2.1" }
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui-winit = { version = "0.37.0", default-features = false, features = ["clipboard", "links"] }
 egui_tiles = "0.18.0"

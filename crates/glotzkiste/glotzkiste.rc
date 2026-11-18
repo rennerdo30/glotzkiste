@@ -1,2 +1,2 @@
 // The app icon (assets/logo/glotzkiste.ico, made by `cargo run -p gk-icon`).
-1 ICON "../../assets/logo/glotzkiste.ico"
+1 ICON "res/glotzkiste.ico"

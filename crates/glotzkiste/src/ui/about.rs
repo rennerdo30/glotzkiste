@@ -5,9 +5,9 @@ use crate::app::App;
 use egui::{RichText, vec2};
 
 const REPO: &str = "https://github.com/rennerdo30/glotzkiste";
-const LICENSE: &str = include_str!("../../../../LICENSE");
-const LIBMPV_NOTICE: &str = include_str!("../../../../licenses/libmpv-NOTICE.txt");
-static LOGO: &[u8] = include_bytes!("../../../../assets/logo/glotzkiste-256.png");
+const LICENSE: &str = include_str!("../../res/LICENSE");
+const LIBMPV_NOTICE: &str = include_str!("../../res/libmpv-NOTICE.txt");
+static LOGO: &[u8] = include_bytes!("../../res/glotzkiste-256.png");
 
 pub(super) fn logo(app: &mut App, ctx: &egui::Context) -> Option<egui::TextureHandle> {
     if app.logo.is_none() {
@@ -93,5 +93,30 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         });
     if !open {
         app.about_open = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The files the app embeds (`res/`, inside the crate so a published
+    /// crate builds) are the repository's originals. Outside the repository
+    /// (a crate from crates.io) there is nothing to compare with.
+    #[test]
+    fn embedded_files_match_the_originals() {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = crate_dir.join("../..");
+        if !root.join("assets/logo/glotzkiste.svg").is_file() {
+            return;
+        }
+        for (copy, original) in [
+            ("res/LICENSE", "LICENSE"),
+            ("res/libmpv-NOTICE.txt", "licenses/libmpv-NOTICE.txt"),
+            ("res/glotzkiste-256.png", "assets/logo/glotzkiste-256.png"),
+            ("res/glotzkiste.ico", "assets/logo/glotzkiste.ico"),
+        ] {
+            let a = std::fs::read(crate_dir.join(copy)).unwrap();
+            let b = std::fs::read(root.join(original)).unwrap();
+            assert!(a == b, "{copy} differs from {original}: copy it again (cargo run -p gk-icon for the logo)");
+        }
     }
 }

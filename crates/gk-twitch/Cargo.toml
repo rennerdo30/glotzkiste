@@ -1,11 +1,21 @@
 [package]
-name = "gk-twitch"
-description = "Twitch access: login, channels, playback, emote sets, image fetch. Blocking; called from worker threads."
+name = "glotzkiste-twitch"
+description = "Twitch access for Glotzkiste: login, channels, playback, emote sets, image fetch. Blocking; called from worker threads."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
+keywords = ["twitch", "streaming", "hls", "emotes"]
+categories = ["api-bindings", "multimedia"]
+include = ["/src/**", "/Cargo.toml"]
+
+# The code name stays gk_twitch (as in the app).
+[lib]
+name = "gk_twitch"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-pc-windows-msvc"]
 
 [dependencies]
 ureq.workspace = true

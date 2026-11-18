@@ -22,6 +22,14 @@ One version for the whole workspace: `version` under `[workspace.package]` in `C
    - writes `SHA256SUMS.txt` over both packages and creates a **draft** release with the changelog section as notes. Rerunning it with the same tag refreshes a draft and never touches a published release.
 4. **The owner reviews the draft and publishes it.**
 
+## crates.io (`cargo install glotzkiste`)
+
+The workspace publishes six crates: the app `glotzkiste` and its libraries `glotzkiste-mpv`, `glotzkiste-twitch`, `glotzkiste-chat`, `glotzkiste-update` and `glotzkiste-render` (folders `crates/gk-*`; their code names stay `gk_*`). `gk-icon` is a tool and is never published. All share the workspace version; the `[workspace.dependencies]` entries of the six carry that version too, so **a release bumps the version in both places**. Files the app embeds live in `crates/glotzkiste/res/` (a crate carries only files inside it); a test fails when they drift from `LICENSE`, `licenses/` and `assets/logo/`, and `cargo run -p gk-icon` writes both copies. CI runs `cargo package --workspace --exclude gk-icon --locked`, which builds every crate from its packaged files.
+
+After the GitHub release of a tag is published, the owner starts **Actions → publish-crate** with that tag ([`.github/workflows/publish-crate.yml`](../.github/workflows/publish-crate.yml)). It checks that the tag is on `main` and matches the version, verifies every package without any secret, then runs `cargo publish --workspace --exclude gk-icon --locked --no-verify` with the token in that step only (dependency order is cargo's). crates.io limits how many **new** crates an account may create in a short time; if the first run stops at the last crate, rerun it later with `package` set to that crate.
+
+The token: a crates.io API token (scopes `publish-new` and `publish-update`, crate pattern `glotzkiste*`), stored as the secret `CARGO_REGISTRY_TOKEN` of the GitHub **environment** `crates-io` (Settings → Environments), not as a repository secret; the environment can require the owner's approval per run. After the first publish, crates.io Trusted Publishing (OIDC) can replace the token.
+
 A new libmpv build means: update the tag, file name and SHA-256 in `scripts/fetch-libmpv.ps1` and the commit and links in `licenses/libmpv-NOTICE.txt` together.
 
 ## Updates in the app
